@@ -84,6 +84,9 @@ struct DesignComponent {
     footprint_id: String,
     symbol_path: String,
     dnp: bool,
+    /// The symbol's Exclude from BOM: the part stays on the board, its
+    /// footprint marked, as KiCad's Update PCB marks it (#875).
+    exclude_from_bom: bool,
     pad_nets: BTreeMap<String, String>,
 }
 
@@ -117,6 +120,7 @@ struct BoardFootprint {
     layer: String,
     locked: bool,
     dnp: bool,
+    exclude_from_bom: bool,
     not_in_schematic: bool,
 }
 
@@ -173,6 +177,7 @@ enum PlannedChange {
         footprint_id: String,
         symbol_path: String,
         dnp: bool,
+        exclude_from_bom: bool,
         pad_nets: BTreeMap<String, String>,
         position: Point,
     },
@@ -182,6 +187,7 @@ enum PlannedChange {
         value: String,
         symbol_path: String,
         dnp: bool,
+        exclude_from_bom: bool,
         pad_nets: BTreeMap<String, String>,
         preserve: PreservedBoardState,
     },
@@ -782,6 +788,7 @@ fn plan_sync(netlist_source: &str, design: &ExportedDesign, board: &BoardState) 
                 footprint_id: component.footprint_id.clone(),
                 symbol_path: component.symbol_path.clone(),
                 dnp: component.dnp,
+                exclude_from_bom: component.exclude_from_bom,
                 pad_nets: component.pad_nets.clone(),
                 position,
             });
@@ -872,6 +879,7 @@ fn plan_sync(netlist_source: &str, design: &ExportedDesign, board: &BoardState) 
             || footprint.value != component.value
             || footprint.symbol_path.as_deref() != Some(component.symbol_path.as_str())
             || footprint.dnp != component.dnp
+            || footprint.exclude_from_bom != component.exclude_from_bom
             || changed_pads > 0;
         if needs_update {
             changes.push(PlannedChange::Update {
@@ -880,6 +888,7 @@ fn plan_sync(netlist_source: &str, design: &ExportedDesign, board: &BoardState) 
                 value: component.value.clone(),
                 symbol_path: component.symbol_path.clone(),
                 dnp: component.dnp,
+                exclude_from_bom: component.exclude_from_bom,
                 pad_nets: component.pad_nets.clone(),
                 preserve: PreservedBoardState {
                     position: footprint.position,
@@ -1123,6 +1132,10 @@ fn parse_exported_netlist(source: &str) -> Result<ExportedDesign> {
             property.find_str("name") == Some("dnp")
                 || property.get(1).and_then(SexpNode::as_str) == Some("dnp")
         });
+        let exclude_from_bom = component_node.find_all("property").iter().any(|property| {
+            property.find_str("name") == Some("exclude_from_bom")
+                || property.get(1).and_then(SexpNode::as_str) == Some("exclude_from_bom")
+        });
 
         let value = required_value(component_node, "value")?;
         // kicad-cli writes no `(footprint …)` node at all for a symbol whose
@@ -1159,6 +1172,7 @@ fn parse_exported_netlist(source: &str) -> Result<ExportedDesign> {
             footprint_id,
             symbol_path,
             dnp,
+            exclude_from_bom,
             pad_nets: BTreeMap::new(),
         });
     }
@@ -1220,6 +1234,7 @@ fn update_footprint_item(
         value,
         symbol_path,
         dnp,
+        exclude_from_bom,
         pad_nets,
         ..
     } = change
@@ -1238,6 +1253,7 @@ fn update_footprint_item(
         value,
         symbol_path,
         *dnp,
+        *exclude_from_bom,
         pad_nets,
         net_codes,
     )?;
@@ -1255,6 +1271,7 @@ fn apply_footprint_fields(
     value: &str,
     symbol_path: &str,
     dnp: bool,
+    exclude_from_bom: bool,
     pad_nets: &BTreeMap<String, String>,
     net_codes: &BTreeMap<String, i32>,
 ) -> Result<()> {
@@ -1279,14 +1296,11 @@ fn apply_footprint_fields(
             .collect(),
         path_human_readable: String::new(),
     });
-    footprint
-        .attributes
-        .get_or_insert_with(Default::default)
-        .do_not_populate = dnp;
-    definition
-        .attributes
-        .get_or_insert_with(Default::default)
-        .do_not_populate = dnp;
+    for attributes in [&mut footprint.attributes, &mut definition.attributes] {
+        let attributes = attributes.get_or_insert_with(Default::default);
+        attributes.do_not_populate = dnp;
+        attributes.exclude_from_bill_of_materials = exclude_from_bom;
+    }
 
     let mut seen_pads = std::collections::HashSet::new();
     for child in &mut definition.items {
@@ -1752,9 +1766,6 @@ fn apply_saved_symbol_flags(files: &[PathBuf], design: &mut ExportedDesign) -> R
         let Some(entry) = entry else {
             return true;
         };
-        if !entry.in_bom {
-            return false;
-        }
         if !entry.on_board {
             design.skipped.push(SkippedComponent {
                 reference: entry.reference.clone(),
@@ -1763,11 +1774,12 @@ fn apply_saved_symbol_flags(files: &[PathBuf], design: &mut ExportedDesign) -> R
             return false;
         }
         component.dnp = entry.dnp;
+        component.exclude_from_bom = !entry.in_bom;
         true
     });
-    // The same flags govern a component with no footprint: excluded from the
-    // BOM it is dropped, excluded from the board it is skipped by flag rather
-    // than reported as unassigned.
+    // The same flag governs a component with no footprint: excluded from the
+    // board it is skipped by flag rather than reported as unassigned. Only
+    // Exclude from board keeps a part off the PCB, as in KiCad (#875).
     design.unassigned.retain(|component| {
         let path_match = flags
             .iter()
@@ -1780,9 +1792,6 @@ fn apply_saved_symbol_flags(files: &[PathBuf], design: &mut ExportedDesign) -> R
         let Some(entry) = entry else {
             return true;
         };
-        if !entry.in_bom {
-            return false;
-        }
         if !entry.on_board {
             design.skipped.push(SkippedComponent {
                 reference: entry.reference.clone(),
@@ -1793,7 +1802,7 @@ fn apply_saved_symbol_flags(files: &[PathBuf], design: &mut ExportedDesign) -> R
         true
     });
     let mut skipped_references = HashSet::new();
-    for entry in flags.iter().filter(|entry| entry.in_bom && !entry.on_board) {
+    for entry in flags.iter().filter(|entry| !entry.on_board) {
         if !skipped_references.insert(entry.reference.as_str()) {
             continue;
         }
@@ -1970,6 +1979,11 @@ fn board_footprint_from_instance(
             .attributes
             .as_ref()
             .map(|attributes| attributes.do_not_populate)
+            .unwrap_or(false),
+        exclude_from_bom: footprint
+            .attributes
+            .as_ref()
+            .map(|attributes| attributes.exclude_from_bill_of_materials)
             .unwrap_or(false),
         not_in_schematic: footprint
             .attributes
@@ -2587,6 +2601,7 @@ fn build_added_footprint(
         footprint_id,
         symbol_path,
         dnp,
+        exclude_from_bom,
         pad_nets,
         position,
     } = change
@@ -2614,6 +2629,7 @@ fn build_added_footprint(
         value,
         symbol_path,
         *dnp,
+        *exclude_from_bom,
         pad_nets,
         net_codes,
     )?;
@@ -3281,6 +3297,7 @@ mod tests {
             footprint_id: "Resistor_SMD:R_0603_1608Metric".to_string(),
             symbol_path: symbol_path.to_string(),
             dnp: false,
+            exclude_from_bom: false,
             pad_nets: BTreeMap::from([
                 ("1".to_string(), "VCC".to_string()),
                 ("2".to_string(), "GND".to_string()),
@@ -3305,6 +3322,7 @@ mod tests {
             layer: "F.Cu".to_string(),
             locked: false,
             dnp: false,
+            exclude_from_bom: false,
             not_in_schematic: false,
         }
     }
@@ -3350,6 +3368,7 @@ mod tests {
                     layer: "B.Cu".to_string(),
                     locked: true,
                     dnp: false,
+                    exclude_from_bom: false,
                     not_in_schematic: false,
                 },
                 BoardFootprint {
@@ -3365,6 +3384,7 @@ mod tests {
                     layer: "F.Cu".to_string(),
                     locked: true,
                     dnp: false,
+                    exclude_from_bom: false,
                     not_in_schematic: true,
                 },
             ],
@@ -3531,6 +3551,7 @@ mod tests {
             value: "NE555".to_string(),
             symbol_path: "/root/u1".to_string(),
             dnp: false,
+            exclude_from_bom: false,
             pad_nets: BTreeMap::from([("1".to_string(), "GND".to_string())]),
             preserve: PreservedBoardState {
                 position: Point { x: 25.0, y: 30.0 },
@@ -3565,6 +3586,88 @@ mod tests {
         assert_eq!(pad.net.as_ref().unwrap().name, "GND");
     }
 
+    /// KiCad's Update PCB keeps a part excluded from the BOM on the board and
+    /// marks its footprint; only Exclude from board keeps it off (#875).
+    #[test]
+    fn a_part_excluded_from_the_bom_stays_on_the_board() {
+        let directory = tempfile::tempdir().unwrap();
+        let schematic = directory.path().join("flags.kicad_sch");
+        let symbol = |reference: &str, uuid: &str, in_bom: &str, on_board: &str| {
+            format!(
+                "(symbol (lib_id \"x:y\") (in_bom {in_bom}) (on_board {on_board}) (dnp no) \
+                 (uuid \"{uuid}\") (instances (project \"p\" (path \"/root\" \
+                 (reference \"{reference}\") (unit 1)))))"
+            )
+        };
+        std::fs::write(
+            &schematic,
+            format!(
+                "(kicad_sch (uuid \"root\") {} {} {})",
+                symbol("TP1", "tp1", "no", "yes"),
+                symbol("R1", "r1", "yes", "yes"),
+                symbol("H1", "h1", "no", "no"),
+            ),
+        )
+        .unwrap();
+        let mut design = ExportedDesign {
+            components: vec![
+                resistor("TP1", "/root/tp1"),
+                resistor("R1", "/root/r1"),
+                resistor("H1", "/root/h1"),
+            ],
+            skipped: Vec::new(),
+            unassigned: Vec::new(),
+        };
+
+        apply_saved_symbol_flags(&[schematic], &mut design).unwrap();
+
+        let kept = design
+            .components
+            .iter()
+            .map(|component| (component.reference.as_str(), component.exclude_from_bom))
+            .collect::<Vec<_>>();
+        assert_eq!(kept, [("TP1", true), ("R1", false)]);
+        let skipped = design
+            .skipped
+            .iter()
+            .map(|component| component.reference.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(skipped, ["H1"]);
+    }
+
+    #[test]
+    fn a_footprint_carries_its_symbol_s_exclude_from_bom() {
+        use konnect_ipc::gen::kiapi;
+        use prost::Message;
+        let item = footprint_with_artwork("TP1");
+        let mut footprint =
+            kiapi::board::types::FootprintInstance::decode(item.value.as_slice()).unwrap();
+
+        for exclude_from_bom in [true, false] {
+            apply_footprint_fields(
+                &mut footprint,
+                "TP1",
+                "TP",
+                "/root/tp1",
+                false,
+                exclude_from_bom,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+            )
+            .unwrap();
+            let instance = footprint.attributes.as_ref().unwrap();
+            let definition = footprint
+                .definition
+                .as_ref()
+                .unwrap()
+                .attributes
+                .as_ref()
+                .unwrap();
+            assert_eq!(instance.exclude_from_bill_of_materials, exclude_from_bom);
+            assert_eq!(definition.exclude_from_bill_of_materials, exclude_from_bom);
+        }
+    }
+
     /// The add path calls `apply_footprint_fields` too (`build_mutation_items`),
     /// so a brand-new footprint was corrupted before it ever reached KiCad.
     #[test]
@@ -3581,6 +3684,7 @@ mod tests {
             "U2",
             "NE555",
             "/root/u2",
+            false,
             false,
             &BTreeMap::from([("1".to_string(), "VCC".to_string())]),
             &BTreeMap::from([("VCC".to_string(), 3)]),
@@ -3659,6 +3763,7 @@ mod tests {
             "NE555",
             "/root/u3",
             false,
+            false,
             &BTreeMap::from([("1".to_string(), "VCC".to_string())]),
             &BTreeMap::new(),
         )
@@ -3716,6 +3821,7 @@ mod tests {
             value: "10k".to_string(),
             symbol_path: "/root/symbol".to_string(),
             dnp: true,
+            exclude_from_bom: false,
             pad_nets: BTreeMap::from([("1".to_string(), "VCC".to_string())]),
             preserve: PreservedBoardState {
                 position: Point { x: 25.0, y: 30.0 },
@@ -3773,6 +3879,7 @@ mod tests {
                 layer: "F.Cu".to_string(),
                 locked: false,
                 dnp: false,
+                exclude_from_bom: false,
                 not_in_schematic: false,
             }],
             routed_nets: BTreeMap::from([("VCC".to_string(), 1)]),
@@ -4872,6 +4979,7 @@ mod tests {
             footprint_id: footprint_id.to_string(),
             symbol_path: format!("/{reference}-uuid"),
             dnp: false,
+            exclude_from_bom: false,
             pad_nets: pads
                 .iter()
                 .map(|pad| (pad.to_string(), format!("{reference}-{pad}")))
@@ -6341,6 +6449,7 @@ mod tests {
             footprint_id: STOCK_0603.into(),
             symbol_path: "/c1-uuid".into(),
             dnp,
+            exclude_from_bom: false,
             pad_nets: BTreeMap::new(),
             position: Point { x: 10.0, y: 10.0 },
         };
