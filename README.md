@@ -1,48 +1,22 @@
 <a name="top"></a>
 
-<div align="center">
+# PCBServer
 
-<img src="resources/images/KiCAD-MCP-Server-rust.svg" alt="KiCAD-MCP-Server Logo" height="240" />
+**AI-assisted PCB design for KiCad 10 through the Model Context Protocol (MCP).**
 
+PCBServer is a community fork of [Konnect](https://github.com/mixelpixx/Konnect) by
+mixelpixx and the Konnect contributors. The upstream repository was archived on
+2026-11-02; PCBServer continues its code under the same license, the
+[AGPL-3.0](LICENSE). It is not affiliated with or endorsed by the Konnect authors,
+Orchis.ai LLC, Konnect-EDA, or the KiCad project. [NOTICE](NOTICE) records the fork
+point and the attribution.
 
-# Konnect has moved to Konnect-EDA
-
-## [Go to Konnect-EDA →](https://github.com/Orchis-ai-LLC/Konnect-EDA)
-
-</div>
-
-This repository is being archived, which makes it read-only. Development continues
-at Konnect-EDA, from Orchis.ai LLC.
-
-## It stays free, unless you're a business
-
-Konnect-EDA is now commercial and closed source. Here's what that means for you:
-
-- **Everyone, businesses included:** free until version 1.0.
-- **Personal, hobby, student and open-hardware work:** still free after 1.0. You'll
-  need a license key, and that key is free too.
-- **Businesses:** a paid license from 1.0.
-
-Business licenses pay for the work, and that's what lets us keep it free for
-everyone else.
-
-**Nothing here is being taken away.** The code and releases in this repository stay
-available under the AGPL-3.0. The original
-[KiCAD MCP Server](https://github.com/mixelpixx/KiCAD-MCP-Server) stays open source
-under the MIT license and is still maintained. The boards you design are always yours.
-
-## Where to go now
-
-- **Downloads:** the [Konnect-EDA releases page](https://github.com/Orchis-ai-LLC/Konnect-EDA/releases).
-  The first release is coming soon.
-- **Bugs and feature requests:** the
-  [Konnect-EDA issue tracker](https://github.com/Orchis-ai-LLC/Konnect-EDA/issues).
-- **Want to help build it?** [Sign up to contribute](https://orchis.ai/konnect/join).
-- **Contributed to Konnect?** Please [complete your sign-off](https://orchis.ai/konnect/sign-off)
-  by November 20.
-- **Using it at a company?** See [licensing](https://konnect-eda.orchis.ai/licensing/).
-
-Thank you to everyone who built Konnect with us.
+> **Status.** The fork starts at upstream commit `676efce` (v0.13.0 plus 62 commits).
+> Internally the code still carries the upstream names: the binary is `konnect`, the
+> crates are `konnect-*`, the KiCad plugin is listed as "Konnect", and the config lives
+> in `~/.config/konnect/`. Renaming them is the first piece of work here, and there
+> will be no PCBServer release before it is done. Until then, the text below says
+> "Konnect" where it means this program.
 
 ---
 
@@ -140,7 +114,8 @@ Konnect.
 
 ### From the KiCAD Plugin Manager (recommended)
 
-1. Download the package for your OS from [Releases](https://github.com/mixelpixx/Konnect/releases):
+1. PCBServer has no release yet (see Status above); build from source for now.
+   Once released, download the package for your OS from [Releases](https://github.com/DavidLazarescu/PCBServer/releases):
    `konnect-pcm-v<version>-windows.zip`, `-macos.zip`, or `-linux.zip`. Each
    bundles that platform's server binary — the macOS package is a universal
    build, so one download covers Apple Silicon and Intel. (The `konnect-pcm-*`
@@ -340,23 +315,23 @@ the main workspace — see [DEV.md](DEV.md) for build steps.
   closed with `unsupported_capability`; it never edits the file underneath a
   live editor that cannot perform the native flip.
 
-## License: free for the little guys
+## License
 
-Konnect is licensed under the **[GNU AGPL-3.0](LICENSE)**.
+PCBServer is licensed under the **[GNU AGPL-3.0-only](LICENSE)**, the license under
+which Konnect was published. There is no commercial or dual license: the copyright
+in the upstream code belongs to its authors, and only they can grant other terms.
+Third-party notices are in [THIRD_PARTY.md](THIRD_PARTY.md).
 
-If you're a hobbyist, student, freelancer, or open-source project: **use it freely,
-no strings attached.** Design boards, ship them, sell them.
-
-If you're a business: the AGPL requires that anything you build on or around Konnect —
-including software provided over a network — be open-sourced under the same license.
-If that doesn't work for you, **commercial licenses are available**: see
-[COMMERCIAL.md](COMMERCIAL.md).
+Using PCBServer, including inside a company, creates no obligations. If you
+distribute it, or let users outside your organisation interact with a modified
+version over a network, you have to offer them the corresponding source under the
+same license. This summary is not legal advice; the license text governs.
 
 ## Relationship to KiCAD-MCP-Server
 
 The original [Python/TypeScript project](https://github.com/mixelpixx/KiCAD-MCP-Server)
-remains fully open (MIT) and maintained. Konnect is where new development happens —
-the architecture it proved, rebuilt for production:
+by the same upstream author is MIT-licensed. Konnect rebuilt its architecture in Rust,
+and PCBServer continues Konnect. The comparison is from the Konnect README:
 
 | | KiCAD-MCP-Server | Konnect |
 |---|---|---|
@@ -366,7 +341,7 @@ the architecture it proved, rebuilt for production:
 | Schematic backend | kicad-skip + custom loaders | Native S-expression engine, atomic writes |
 | Context cost | Router pattern | Load/unload toolsets + observability |
 | Skills / agents | — | 6 skills + 2 agents bundled |
-| License | MIT | AGPL-3.0 + commercial |
+| License | MIT | AGPL-3.0 |
 
 ## Troubleshooting
 
@@ -392,9 +367,6 @@ works only when passed with `--config`.)
 
 ## Support
 
-- Community Discord: [join the Konnect community](https://discord.gg/NVp9RGMmDu)
-  for installation help, AI-client setup, design-workflow discussion,
-  contributor coordination, and live project-status updates
-- Issues & feature requests: [GitHub Issues](https://github.com/mixelpixx/Konnect/issues)
-- Roadmap: [ROADMAP.md](ROADMAP.md)
+- Issues and feature requests: [GitHub Issues](https://github.com/DavidLazarescu/PCBServer/issues)
+- Roadmap (inherited from Konnect): [ROADMAP.md](ROADMAP.md)
 - Contributing: [CONTRIBUTING.md](CONTRIBUTING.md)

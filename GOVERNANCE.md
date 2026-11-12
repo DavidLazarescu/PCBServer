@@ -1,28 +1,14 @@
-# How Konnect is run
+# How PCBServer is run
 
-One page, so nobody has to reconstruct this from issue threads.
+## Maintainer
 
-## Maintainers
+- **[@DavidLazarescu](https://github.com/DavidLazarescu)**, repository owner.
+  Decides scope, releases, and anything not settled below.
 
-- **[@mixelpixx](https://github.com/mixelpixx)** — project owner. Decides
-  scope, releases, licensing, and anything not settled below.
-- **[@neusse](https://github.com/neusse)** — maintainer. Owns the areas listed
-  in [`.github/CODEOWNERS`](.github/CODEOWNERS).
-
-### Current repository access model
-
-Konnect currently lives in a personal GitHub account. [GitHub gives a personal
-repository one owner and write collaborators](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/repository-access-and-collaboration/permission-levels-for-a-personal-account-repository);
-it does not offer the granular Triage, Maintain, and Admin roles available to
-organization repositories.
-Accordingly, `@neusse` can triage, label, assign, review, push, merge, and arm
-auto-merge, but cannot change repository settings or bypass the `main` ruleset.
-Only `@mixelpixx`, as owner, can administer those controls.
-
-Moving Konnect to an organization is accepted in principle but is not part of
-the current workflow. Until that happens, [GitHub's native merge queue](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue)
-is not available here. The ordered queue below, the `status:*` labels, and
-auto-merge provide the deliberately smaller substitute.
+PCBServer is a fork of Konnect (see [NOTICE](NOTICE)). The rest of this page is the
+process Konnect used, kept as the starting point and adapted as PCBServer grows.
+Where it names Konnect's maintainers (`@mixelpixx`, `@neusse`), it describes how
+Konnect was run, not who maintains PCBServer.
 
 Konnect is deliberately built and reviewed through **two different AI
 toolchains** — Claude Code on one side, OpenAI Codex on the other. That is not
@@ -324,7 +310,5 @@ The workflow enforces timing only. It never chooses the disposition.
 
 ## Licensing
 
-Konnect is AGPL-3.0 with commercial licences available, so contributions must
-be relicensable. Submitting a contribution accepts the CLA in
-[CONTRIBUTING.md](CONTRIBUTING.md). If you cannot agree to it, open an issue
-describing the change instead — a reimplementation from a description is fine.
+PCBServer is AGPL-3.0-only. Contributions are accepted under that license and
+no other; see [CONTRIBUTING.md](CONTRIBUTING.md).

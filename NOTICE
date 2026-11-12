@@ -1,0 +1,34 @@
+PCBServer
+Copyright (C) 2026 David Lazarescu and PCBServer contributors
+
+PCBServer is a modified version of Konnect, an AI-assisted PCB design server
+for KiCad published at https://github.com/mixelpixx/Konnect under the
+GNU Affero General Public License, version 3 only (AGPL-3.0-only).
+
+  Upstream:     https://github.com/mixelpixx/Konnect
+  Fork point:   commit 676efce43c9779f9f9e59a9181cb0746c6452650 (2026-11-01),
+                tag v0.13.0 plus 62 commits
+  Forked on:    2026-11-12
+  Upstream copyright: mixelpixx and the Konnect contributors, as recorded
+                in this repository's git history
+
+The upstream repository was archived by its owner on 2026-11-02. Its code
+remains available under the AGPL-3.0, and PCBServer continues it under the
+same license (see LICENSE).
+
+Modifications made in this fork are recorded, with author and date, in the
+git history of this repository from the fork point onward. Files changed after
+the fork point are modified versions of the upstream files.
+
+PCBServer is an independent project. It is not affiliated with, sponsored by
+or endorsed by the Konnect authors, Orchis.ai LLC, Konnect-EDA, or the KiCad
+project. "Konnect" and "Konnect-EDA" are names used by their respective owners;
+"KiCad" is the name of the KiCad EDA project. They appear here only to describe
+the origin of this software and what it works with.
+
+Third-party components and their licenses are listed in THIRD_PARTY.md.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+details.

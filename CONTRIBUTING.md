@@ -1,4 +1,4 @@
-# Contributing to Konnect
+# Contributing to PCBServer
 
 Thanks for your interest! Bug reports, feature requests, and pull requests are welcome.
 
@@ -221,20 +221,14 @@ First PR from a fork? CI workflows may sit at "waiting for approval" until a
 maintainer approves the run — that's a GitHub setting for first-time contributors,
 not a failure on your part.
 
-## Contributor License Agreement
+## Licensing of contributions
 
-Konnect is dual-licensed: AGPL-3.0 for the community, with commercial licenses
-available for organizations that can't comply with the AGPL (see
-[COMMERCIAL.md](COMMERCIAL.md)). To make that possible, the project must be able to
-relicense contributed code.
+PCBServer is licensed under the AGPL-3.0-only and has no commercial or dual
+license. A contribution is licensed to the project and to everyone else under
+that same license, and under nothing else. There is no contributor license
+agreement, so no one, including the maintainer, can take contributed code
+proprietary.
 
-By submitting a contribution, you agree that:
-
-1. You have the right to submit the work under the project's licenses.
-2. You grant the project maintainer a perpetual, worldwide, non-exclusive,
-   royalty-free, irrevocable license to use, reproduce, modify, distribute, and
-   sublicense your contribution — including under licenses other than the AGPL.
-3. Your contribution remains available to the community under the AGPL-3.0.
-
-If you can't agree to these terms, please open an issue describing the change
-instead of a pull request — reimplementations from descriptions are fine.
+By submitting a contribution you confirm that you have the right to submit it
+under the AGPL-3.0-only. Sign off your commits (`git commit -s`) to record this
+as described in the [Developer Certificate of Origin](https://developercertificate.org/).

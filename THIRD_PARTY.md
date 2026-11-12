@@ -1,9 +1,9 @@
 # Third-Party Notices
 
-Konnect incorporates data, algorithms, and code ported from the following
-projects. Konnect itself is licensed under the AGPL-3.0 (see LICENSE) with a
-commercial option (see COMMERCIAL.md); the notices below travel with every
-distribution of Konnect, under either license.
+PCBServer, a fork of Konnect (see NOTICE), incorporates data, algorithms, and
+code ported from the following projects. PCBServer is licensed under the
+AGPL-3.0-only (see LICENSE); the notices below travel with every distribution
+of it.
 
 ## topola_specctra
 
