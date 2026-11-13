@@ -2264,7 +2264,7 @@ fn apply_library_fields(
         .map(|angle| angle.value_degrees)
         .unwrap_or(0.0);
     let place = |field: &konnect_ipc::gen::kiapi::board::types::Field| {
-        super::pcb_footprint_update::transform_library_property(field, &position, rotation, false)
+        super::pcb_footprint_update::transform_library_property(field, &position, rotation, None)
     };
     let definition = footprint
         .definition
