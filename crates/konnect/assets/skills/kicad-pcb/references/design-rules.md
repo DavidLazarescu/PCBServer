@@ -23,8 +23,9 @@ and every applicable requirement has a project rule or explicit review check.
 ## 2. Encode the accepted values
 
 Use `set_design_rules` for board-wide minima and `get_design_rules` to read back
-what was stored. Use `create_netclass` for electrical groups and
-`assign_net_to_class` for exact net membership. Use `set_predefined_sizes` for
+what was stored. Use `create_netclass` for electrical groups (it works with the
+board open in KiCad; save the board afterwards) and `assign_net_to_class` for
+exact net membership (board closed in KiCad). Use `set_predefined_sizes` for
 the accepted trace/via palette.
 
 The project netclasses are the source of truth for routing widths, clearances, and

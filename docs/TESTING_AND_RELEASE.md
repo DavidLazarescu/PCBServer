@@ -71,6 +71,20 @@ cargo test -p konnect-core --locked one_undo_restores_the_exact_pre_import_board
 When the test prints `LIVE_UNDO_READY`, press Ctrl+Z once in PCB Editor. The
 test passes only when the exact pre-import IPC snapshot returns.
 
+Net classes over IPC have their own live gate,
+`net_classes_round_trip_through_live_kicad` in
+`crates/konnect/tests/live_kicad_tools.rs`. It creates and updates a class
+named `KonnectLiveProbe` through the served tools, checks it with an
+independent `GetNetClasses`, checks that `assign_net_to_class` is refused and
+that the `.kicad_pro` is unchanged until the save, then saves the board and
+reads the class from the project file. It writes and saves, so open a
+disposable copy of a board that has its sibling `.kicad_pro`, set
+`KONNECT_LIVE_KICAD_BOARD` and `KICAD_API_SOCKET`, then run:
+
+```text
+cargo test -p konnect --test live_kicad_tools -- --ignored --nocapture net_classes_round_trip_through_live_kicad
+```
+
 ## CI And Live Validation
 
 `.github/workflows/ci.yml` covers the Rust workspace, formatting, clippy,

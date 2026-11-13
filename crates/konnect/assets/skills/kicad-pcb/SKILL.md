@@ -305,8 +305,14 @@ Define routing rules for groups of nets:
 create_netclass(board, name, trace_width?, clearance?, via_drill?, via_diameter?)
 ```
 
-The class is written to the project's `.kicad_pro` file, which is where KiCad
-has kept netclasses since v7 — the board file is not modified.
+KiCad may stay open. While KiCad holds the board, the class is written into
+KiCad's loaded project over IPC and read back (`source: ipc`); it reaches the
+`.kicad_pro` when the board is saved (`save_project`), and KiCad does not ask
+before discarding it on close, so save before closing. With the board closed,
+the `.kicad_pro` is edited directly. The board file is never modified.
+`assign_net_to_class` is the exception: KiCad's IPC API has no pattern
+command, so it needs the board closed in KiCad (or assign the net in KiCad's
+Board Setup).
 
 Before creating or updating a class, read `get_netclasses` and the applicable
 design-rule/trace-sizing references. Derive width, clearance, gap, drill, and

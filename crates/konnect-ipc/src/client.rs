@@ -502,6 +502,109 @@ fn unpack_required<M: Message + Default>(
     unpack_any(&response)
 }
 
+/// A `NetClass` as the crate's own type. Via sizes are read the way KiCad's
+/// `NETCLASS::Deserialize` reads them: the diameter from the first copper
+/// layer's x size, the drill from the drill's x diameter.
+fn net_class_from_proto(class: &kiapi::common::project::NetClass) -> IpcNetClass {
+    let board = class.board.as_ref();
+    let distance = |pick: fn(
+        &kiapi::common::project::NetClassBoardSettings,
+    ) -> &Option<kiapi::common::types::Distance>| {
+        board
+            .and_then(|settings| pick(settings).as_ref())
+            .map(|distance| distance.value_nm)
+    };
+    let via_stack = board.and_then(|settings| settings.via_stack.as_ref());
+    let schematic = class.schematic.as_ref();
+    IpcNetClass {
+        name: class.name.clone(),
+        priority: class.priority,
+        clearance_nm: distance(|settings| &settings.clearance),
+        track_width_nm: distance(|settings| &settings.track_width),
+        via_diameter_nm: via_stack
+            .and_then(|stack| stack.copper_layers.first())
+            .and_then(|layer| layer.size.as_ref())
+            .map(|size| size.x_nm),
+        via_drill_nm: via_stack
+            .and_then(|stack| stack.drill.as_ref())
+            .and_then(|drill| drill.diameter.as_ref())
+            .map(|diameter| diameter.x_nm),
+        diff_pair_width_nm: distance(|settings| &settings.diff_pair_track_width),
+        diff_pair_gap_nm: distance(|settings| &settings.diff_pair_gap),
+        diff_pair_via_gap_nm: distance(|settings| &settings.diff_pair_via_gap),
+        has_wire_width: schematic.is_some_and(|settings| settings.wire_width.is_some()),
+        has_bus_width: schematic.is_some_and(|settings| settings.bus_width.is_some()),
+    }
+}
+
+/// The `SetNetClasses` request for `classes`.
+///
+/// Only the distances an update names are sent, because KiCad keeps every
+/// value a message leaves out. The via stack mirrors what
+/// `NETCLASS::Serialize` produces: one round `F.Cu` copper layer for the
+/// diameter, a round drill for the hole.
+fn set_net_classes_message(
+    classes: &[IpcNetClassUpdate],
+    mode: IpcNetClassMergeMode,
+) -> kiapi::common::commands::SetNetClasses {
+    use kiapi::board::types::{
+        BoardLayer, DrillProperties, PadStack, PadStackLayer, PadStackShape,
+    };
+    use kiapi::common::project::{NetClass, NetClassBoardSettings, NetClassType};
+    use kiapi::common::types::{Distance, MapMergeMode, Vector2};
+
+    let distance = |nm: Option<i64>| nm.map(|value_nm| Distance { value_nm });
+    let round = |nm: i64| Vector2 { x_nm: nm, y_nm: nm };
+    let net_classes =
+        classes
+            .iter()
+            .map(|class| {
+                let via_stack = (class.via_diameter_nm.is_some() || class.via_drill_nm.is_some())
+                    .then(|| PadStack {
+                        copper_layers: class
+                            .via_diameter_nm
+                            .map(|nm| PadStackLayer {
+                                layer: BoardLayer::BlFCu as i32,
+                                shape: PadStackShape::PssCircle as i32,
+                                size: Some(round(nm)),
+                                ..Default::default()
+                            })
+                            .into_iter()
+                            .collect(),
+                        drill: class.via_drill_nm.map(|nm| DrillProperties {
+                            diameter: Some(round(nm)),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    });
+                NetClass {
+                    name: class.name.clone(),
+                    priority: Some(class.priority),
+                    board: Some(NetClassBoardSettings {
+                        clearance: distance(class.clearance_nm),
+                        track_width: distance(class.track_width_nm),
+                        diff_pair_track_width: distance(class.diff_pair_width_nm),
+                        diff_pair_gap: distance(class.diff_pair_gap_nm),
+                        diff_pair_via_gap: distance(class.diff_pair_via_gap_nm),
+                        via_stack,
+                        ..Default::default()
+                    }),
+                    schematic: None,
+                    // KiCad refuses to create an implicit class from a message.
+                    r#type: NetClassType::NctExplicit as i32,
+                    constituents: Vec::new(),
+                }
+            })
+            .collect();
+    kiapi::common::commands::SetNetClasses {
+        net_classes,
+        merge_mode: match mode {
+            IpcNetClassMergeMode::Merge => MapMergeMode::MmmMerge,
+            IpcNetClassMergeMode::Replace => MapMergeMode::MmmReplace,
+        } as i32,
+    }
+}
+
 fn ensure_item_request_ok(status: i32, operation: &str) -> Result<()> {
     let status = kiapi::common::types::ItemRequestStatus::try_from(status)
         .unwrap_or(kiapi::common::types::ItemRequestStatus::IrsUnknown);
@@ -2037,6 +2140,45 @@ impl KiCadIpcClient {
             );
         }
         Ok(rules)
+    }
+
+    /// Read every explicit net class of the project KiCad has loaded, the
+    /// Default first.
+    ///
+    /// The command names no document: KiCad answers from its active project
+    /// (`handleGetNetClasses` in `common/api/api_handler_common.cpp`). A caller
+    /// that means one board must first establish that this board is the one
+    /// KiCad holds. Netclass pattern assignments are not part of the answer.
+    pub fn get_net_classes(&self) -> Result<Vec<IpcNetClass>> {
+        let response = unpack_required::<kiapi::common::commands::NetClassesResponse>(
+            self.send_command(
+                &kiapi::common::commands::GetNetClasses {},
+                "kiapi.common.commands.GetNetClasses",
+            )?,
+            "GetNetClasses",
+        )?;
+        Ok(response
+            .net_classes
+            .iter()
+            .map(net_class_from_proto)
+            .collect())
+    }
+
+    /// Add or update net classes in the project KiCad has loaded.
+    ///
+    /// Like [`Self::get_net_classes`] this addresses KiCad's active project,
+    /// not a document. KiCad changes its in-memory project only; the change
+    /// reaches the `.kicad_pro` when the board is next saved.
+    pub fn set_net_classes(
+        &self,
+        classes: &[IpcNetClassUpdate],
+        mode: IpcNetClassMergeMode,
+    ) -> Result<()> {
+        self.send_command(
+            &set_net_classes_message(classes, mode),
+            "kiapi.common.commands.SetNetClasses",
+        )?;
+        Ok(())
     }
 
     /// Get board items by type.
@@ -7050,5 +7192,263 @@ mod stackup_tests {
         assert_eq!(stackup.edge_connector, "unknown");
         assert!(!stackup.has_edge_plating);
         assert!(stackup.layers.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod net_class_tests {
+    use super::*;
+    use kiapi::common::project::{NetClass, NetClassBoardSettings, NetClassSchematicSettings};
+    use kiapi::common::types::{Distance, MapMergeMode, Vector2};
+
+    /// A KiCad double on its own `inproc://` endpoint that answers exactly one
+    /// request with `reply` and hands that request back.
+    fn answer_once(
+        name: &str,
+        reply: Option<prost_types::Any>,
+    ) -> (String, std::thread::JoinHandle<prost_types::Any>) {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let address = format!(
+            "inproc://net-class-{name}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        let socket = nng::Socket::new(nng::Protocol::Rep0).unwrap();
+        socket.listen(&address).unwrap();
+        let worker = std::thread::spawn(move || {
+            let request = socket.recv().unwrap();
+            let request = kiapi::common::ApiRequest::decode(request.as_slice()).unwrap();
+            let response = kiapi::common::ApiResponse {
+                status: Some(kiapi::common::ApiResponseStatus {
+                    status: kiapi::common::ApiStatusCode::AsOk as i32,
+                    error_message: String::new(),
+                }),
+                header: None,
+                message: reply,
+            };
+            socket
+                .send(nng::Message::from(response.encode_to_vec().as_slice()))
+                .unwrap();
+            request.message.expect("a command")
+        });
+        (address, worker)
+    }
+
+    fn update(name: &str) -> IpcNetClassUpdate {
+        IpcNetClassUpdate {
+            name: name.to_string(),
+            priority: -1,
+            clearance_nm: None,
+            track_width_nm: None,
+            via_diameter_nm: None,
+            via_drill_nm: None,
+            diff_pair_width_nm: None,
+            diff_pair_gap_nm: None,
+            diff_pair_via_gap_nm: None,
+        }
+    }
+
+    /// The fields KiCad's `NETCLASS::Deserialize` reads, and nothing it would
+    /// read as an instruction the caller did not give.
+    #[test]
+    fn set_message_carries_only_the_named_values() {
+        let mut hv = update("HV");
+        hv.priority = 3;
+        hv.clearance_nm = Some(500_000);
+        hv.via_diameter_nm = Some(800_000);
+        hv.via_drill_nm = Some(400_000);
+
+        let message = set_net_classes_message(&[hv], IpcNetClassMergeMode::Merge);
+
+        assert_eq!(message.merge_mode, MapMergeMode::MmmMerge as i32);
+        assert_eq!(message.net_classes.len(), 1);
+        let class = &message.net_classes[0];
+        assert_eq!(class.name, "HV");
+        assert_eq!(class.priority, Some(3));
+        assert_eq!(
+            class.r#type,
+            kiapi::common::project::NetClassType::NctExplicit as i32
+        );
+        assert!(class.schematic.is_none());
+        let board = class.board.as_ref().expect("board settings");
+        assert_eq!(board.clearance, Some(Distance { value_nm: 500_000 }));
+        assert!(board.track_width.is_none());
+        assert!(board.diff_pair_track_width.is_none());
+        assert!(board.diff_pair_gap.is_none());
+        assert!(board.diff_pair_via_gap.is_none());
+        assert!(board.color.is_none());
+        assert!(board.tuning_profile.is_none());
+        let stack = board.via_stack.as_ref().expect("a via stack");
+        assert_eq!(stack.copper_layers.len(), 1);
+        assert_eq!(
+            stack.copper_layers[0].size,
+            Some(Vector2 {
+                x_nm: 800_000,
+                y_nm: 800_000
+            })
+        );
+        assert_eq!(
+            stack.drill.as_ref().and_then(|drill| drill.diameter),
+            Some(Vector2 {
+                x_nm: 400_000,
+                y_nm: 400_000
+            })
+        );
+    }
+
+    /// A drill alone must not arrive with a copper layer: KiCad would read the
+    /// diameter from it.
+    #[test]
+    fn a_via_drill_alone_sends_no_copper_layer() {
+        let mut class = update("HV");
+        class.via_drill_nm = Some(300_000);
+
+        let message = set_net_classes_message(&[class], IpcNetClassMergeMode::Merge);
+
+        let stack = message.net_classes[0]
+            .board
+            .as_ref()
+            .and_then(|board| board.via_stack.as_ref())
+            .expect("a via stack");
+        assert!(stack.copper_layers.is_empty());
+        assert!(stack.drill.is_some());
+    }
+
+    #[test]
+    fn no_via_value_sends_no_via_stack_and_replace_is_spelled_out() {
+        let message = set_net_classes_message(&[update("HV")], IpcNetClassMergeMode::Replace);
+
+        assert_eq!(message.merge_mode, MapMergeMode::MmmReplace as i32);
+        assert!(message.net_classes[0]
+            .board
+            .as_ref()
+            .is_some_and(|board| board.via_stack.is_none()));
+    }
+
+    /// What `NETCLASS::Serialize` sends for a sparse class and for KiCad's
+    /// Default, read back field for field.
+    #[test]
+    fn a_kicad_shaped_response_reads_into_the_crate_type() {
+        let default = NetClass {
+            name: "Default".into(),
+            priority: Some(i32::MAX),
+            board: Some(NetClassBoardSettings {
+                clearance: Some(Distance { value_nm: 200_000 }),
+                track_width: Some(Distance { value_nm: 200_000 }),
+                diff_pair_track_width: Some(Distance { value_nm: 200_000 }),
+                diff_pair_gap: Some(Distance { value_nm: 250_000 }),
+                diff_pair_via_gap: Some(Distance { value_nm: 250_000 }),
+                via_stack: Some(kiapi::board::types::PadStack {
+                    copper_layers: vec![kiapi::board::types::PadStackLayer {
+                        size: Some(Vector2 {
+                            x_nm: 600_000,
+                            y_nm: 600_000,
+                        }),
+                        ..Default::default()
+                    }],
+                    drill: Some(kiapi::board::types::DrillProperties {
+                        diameter: Some(Vector2 {
+                            x_nm: 300_000,
+                            y_nm: 300_000,
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            schematic: Some(NetClassSchematicSettings {
+                wire_width: Some(Distance { value_nm: 1524 }),
+                bus_width: Some(Distance { value_nm: 3048 }),
+                ..Default::default()
+            }),
+            r#type: kiapi::common::project::NetClassType::NctExplicit as i32,
+            constituents: vec!["Default".into()],
+        };
+        let sparse = NetClass {
+            name: "HV".into(),
+            priority: Some(-1),
+            board: Some(NetClassBoardSettings {
+                clearance: Some(Distance { value_nm: 500_000 }),
+                ..Default::default()
+            }),
+            schematic: Some(NetClassSchematicSettings::default()),
+            r#type: kiapi::common::project::NetClassType::NctExplicit as i32,
+            constituents: vec!["HV".into()],
+        };
+        let reply = pack_any(
+            &kiapi::common::commands::NetClassesResponse {
+                net_classes: vec![default, sparse],
+            },
+            "kiapi.common.commands.NetClassesResponse",
+        );
+        let (address, worker) = answer_once("get", Some(reply));
+
+        let classes = KiCadIpcClient::new(address).get_net_classes().unwrap();
+
+        let request = worker.join().unwrap();
+        assert_eq!(
+            request.type_url,
+            "type.googleapis.com/kiapi.common.commands.GetNetClasses"
+        );
+        assert_eq!(
+            classes,
+            vec![
+                IpcNetClass {
+                    name: "Default".into(),
+                    priority: Some(i32::MAX),
+                    clearance_nm: Some(200_000),
+                    track_width_nm: Some(200_000),
+                    via_diameter_nm: Some(600_000),
+                    via_drill_nm: Some(300_000),
+                    diff_pair_width_nm: Some(200_000),
+                    diff_pair_gap_nm: Some(250_000),
+                    diff_pair_via_gap_nm: Some(250_000),
+                    has_wire_width: true,
+                    has_bus_width: true,
+                },
+                IpcNetClass {
+                    name: "HV".into(),
+                    priority: Some(-1),
+                    clearance_nm: Some(500_000),
+                    ..Default::default()
+                },
+            ]
+        );
+    }
+
+    /// An `AS_OK` with no body is KiCad declining to answer, not a project
+    /// without net classes.
+    #[test]
+    fn an_empty_get_reply_is_an_error_not_an_empty_list() {
+        let (address, worker) = answer_once("empty", None);
+
+        let error = KiCadIpcClient::new(address)
+            .get_net_classes()
+            .expect_err("no payload is no answer");
+
+        worker.join().unwrap();
+        assert!(format!("{error:#}").contains("GetNetClasses"), "{error:#}");
+    }
+
+    #[test]
+    fn set_sends_the_built_message_under_its_own_type() {
+        let mut hv = update("HV");
+        hv.track_width_nm = Some(300_000);
+        let (address, worker) = answer_once("set", None);
+
+        KiCadIpcClient::new(address)
+            .set_net_classes(&[hv.clone()], IpcNetClassMergeMode::Merge)
+            .unwrap();
+
+        let request = worker.join().unwrap();
+        assert_eq!(
+            request.type_url,
+            "type.googleapis.com/kiapi.common.commands.SetNetClasses"
+        );
+        assert_eq!(
+            kiapi::common::commands::SetNetClasses::decode(request.value.as_slice()).unwrap(),
+            set_net_classes_message(&[hv], IpcNetClassMergeMode::Merge)
+        );
     }
 }

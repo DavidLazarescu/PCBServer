@@ -1,12 +1,14 @@
 //! `pcb_routing` toolset — traces, vias, copper pours, nets, netclasses, and diff pairs.
 //!
-//! Routing operations use the KiCAD IPC API; `add_net`, `create_netclass`, and
-//! `add_copper_pour` use S-expression file manipulation.
+//! Routing operations use the KiCAD IPC API; `add_net` and `add_copper_pour`
+//! use S-expression file manipulation. Net classes go through KiCad's IPC API
+//! while it holds the board and through the `.kicad_pro` otherwise.
 
 use crate::mcp::error::ToolErrorKind;
 use crate::mcp::protocol::CallToolResult;
 use crate::tool;
 use crate::tools::board_source::{self, BoardSource};
+use crate::tools::pcb_board::{LiveOrClosed, NoLiveBoard};
 use crate::tools::{
     get_path, opt_f64, require_f64, require_str, with_board_ipc_classified,
     with_bound_board_ipc_classified, BoardBinding, ToolContext, ToolDef,
@@ -230,58 +232,66 @@ pub fn tools() -> Vec<ToolDef> {
         .with_board_access(crate::tools::BoardAccess::LiveOnly),
         tool!(
             "create_netclass",
-            "Create or update a netclass in the project's design rules. Writes \
-             net_settings in the sibling .kicad_pro (where KiCad keeps netclasses \
-             since v7); the board file is never touched. Requires the project file \
-             to exist. Refuses while KiCad holds the board open, because KiCad's next \
-             save rewrites the project file from its own copy. An update changes only \
-             the settings you name. To see what a \
-             class holds, call get_netclasses rather than this tool: naming a class \
-             that does not exist here creates it with the defaults, so a call meant \
-             as a look writes one instead — and its result is nearly \
-             indistinguishable from a read of an existing class. The class \
-             named 'Default' is special: it is written complete, because KiCad \
-             replaces its own default with it and backfills every other class \
-             from it. Calling this on an existing, incomplete 'Default' \
-             repairs it in place without touching values already set.",
+            "Create or update a netclass in the project's design rules. KiCad may stay \
+             open. When KiCad holds this board, the class is written into KiCad's loaded \
+             project over its IPC API and read back ('source': 'ipc'); the change is then \
+             in KiCad's memory only ('persisted': false) and reaches the .kicad_pro when \
+             the board is saved (save_project or File > Save), and KiCad does not ask \
+             before discarding it on close. When no KiCad holds the board, net_settings \
+             in the sibling .kicad_pro is edited ('source': 'project_file'). The board \
+             file is never touched, and the project file must exist. A KiCad that holds \
+             the board but fails the call, or whose loaded project is another one, is \
+             refused; the file is never written underneath an open editor. An update \
+             changes only the settings you name; a call that changes nothing reports \
+             'changed': false and writes nothing. To see what a class holds, call \
+             get_netclasses rather than this tool: naming a class that does not exist \
+             here creates it with the defaults. The class named 'Default' is special: \
+             calling this on it repairs settings it lacks without touching values \
+             already set. Over IPC only the PCB settings can be repaired; a missing \
+             schematic wire or bus width is reported under 'refused_parts' with \
+             'complete': false, and is repaired by calling again with the board closed.",
             json!({
                 "type": "object",
                 "properties": {
-                    "board":        { "type": "string", "description": "Path to .kicad_pcb file; the sibling .kicad_pro is edited" },
-                    "name":         { "type": "string", "description": "Netclass name (e.g. 'Power')" },
-                    "clearance":    { "type": "number", "description": "Clearance in mm", "default": 0.2 },
-                    "trace_width":  { "type": "number", "description": "Default trace width in mm", "default": 0.25 },
-                    "via_drill":    { "type": "number", "description": "Via drill diameter in mm", "default": 0.4 },
-                    "via_diameter": { "type": "number", "description": "Via pad diameter in mm", "default": 0.8 }
+                    "board":        { "type": "string", "description": "Path to .kicad_pcb file. Its sibling .kicad_pro must exist; it is the project KiCad must have loaded for the live path, and the file the closed-board path edits" },
+                    "name":         { "type": "string", "description": "Netclass name (e.g. 'Power'); 'Default' is the fallback class" },
+                    "clearance":    { "type": "number", "minimum": 0, "description": "Clearance in mm (default 0.2 for a new class)" },
+                    "trace_width":  { "type": "number", "minimum": 0, "description": "Default trace width in mm (default 0.25 for a new class)" },
+                    "via_drill":    { "type": "number", "minimum": 0, "description": "Via drill diameter in mm (default 0.4 for a new class)" },
+                    "via_diameter": { "type": "number", "minimum": 0, "description": "Via pad diameter in mm (default 0.8 for a new class)" }
                 },
                 "required": ["board", "name"]
             }),
             |args, ctx| async move { handle_create_netclass(args, ctx).await }
-        ),
+        )
+        .with_board_access(crate::tools::BoardAccess::LivePreferredWithFallback),
         tool!(
             "get_netclasses",
             "Read every netclass in the project's design rules, with its settings, \
-             its netclass_patterns and the board nets those patterns match. The \
-             answer is mixed-source and says so in 'sources': definitions and \
-             patterns always come from the sibling .kicad_pro, while the board nets \
-             come from the board KiCad holds open where it can and from the saved \
-             board file otherwise ('board_source' selects that); KiCad need not be \
-             running. Call before create_netclass to see what a class holds — an \
+             its netclass_patterns and the board nets those patterns match. KiCad may \
+             stay open. The answer is mixed-source and says so in 'sources': where \
+             KiCad holds this board, definitions and nets come from KiCad over its IPC \
+             API, unsaved edits included; otherwise from the sibling .kicad_pro and the \
+             saved board ('board_source' selects that). Patterns always come from the \
+             .kicad_pro, because KiCad's IPC API cannot read them, so pattern edits \
+             made in KiCad since the last save are missing ('patterns_note' says so on \
+             a live read). Call before create_netclass to see what a class holds — an \
              update changes only the values you name, and this is the only way to \
              see the rest. A net can match several classes: KiCad takes each \
              property from the highest-priority class that sets it (lower number = \
              higher priority) and falls back to Default. Settings are reported \
              resolved, with 'inherits' naming the ones a class takes from the \
              Default rather than setting itself; 'missing_fields' on the \
-             Default names settings nothing can resolve. 'orphan_patterns' \
-             lists patterns naming a class that does not exist; \
+             Default names settings nothing can resolve, and on a live read \
+             'fields_not_checked' names the ones KiCad's API does not report. \
+             'orphan_patterns' lists patterns naming a class that does not exist; \
              'unmatched_patterns' lists patterns whose class exists but which \
              fit no net on the board read (null when its nets are \
              unavailable).",
             json!({
                 "type": "object",
                 "properties": {
-                    "board": { "type": "string", "description": "Path to .kicad_pcb file; the sibling .kicad_pro is read" },
+                    "board": { "type": "string", "description": "Path to .kicad_pcb file; its sibling .kicad_pro must exist" },
                     "board_source": board_source::board_source_schema()
                 },
                 "required": ["board"]
@@ -293,9 +303,12 @@ pub fn tools() -> Vec<ToolDef> {
             "assign_net_to_class",
             "Assign a net to an existing netclass, as a netclass_patterns entry in \
              the sibling .kicad_pro. The class must already exist (create_netclass). \
-             Reassigning moves the net's entry to the new class. Refuses while KiCad \
-             holds the board open, because KiCad's next save rewrites the project \
-             file from its own copy.",
+             Reassigning moves the net's entry to the new class. Needs the board \
+             closed in KiCad: KiCad's IPC API has no command for pattern assignments, \
+             and KiCad's next save would rewrite a project file edited underneath it. \
+             While KiCad holds the board it refuses with 'unsupported_capability'; \
+             assign the net in KiCad's Board Setup instead, or close the board and \
+             retry.",
             json!({
                 "type": "object",
                 "properties": {
@@ -306,7 +319,8 @@ pub fn tools() -> Vec<ToolDef> {
                 "required": ["board", "net_name", "netclass"]
             }),
             |args, ctx| async move { handle_assign_net_to_class(args, ctx).await }
-        ),
+        )
+        .with_board_access(crate::tools::BoardAccess::ClosedBoardOnly),
         tool!(
             "route_differential_pair",
             "Route a differential pair (two parallel traces with a specified gap).",
@@ -1297,37 +1311,384 @@ fn project_settings_path(board_path: &std::path::Path) -> std::path::PathBuf {
     board_path.with_extension("kicad_pro")
 }
 
+/// The refusal for a board with no sibling project file, or `None` when it
+/// has one. Checked before KiCad is asked anything: KiCad keeps net classes
+/// in the project too, and a board without one has nowhere to keep them.
+fn missing_project_file(board_path: &std::path::Path) -> Option<CallToolResult> {
+    let pro = project_settings_path(board_path);
+    (!pro.exists()).then(|| {
+        CallToolResult::error(format!(
+            "No project file at {} — net classes live in the .kicad_pro since KiCad 7, \
+             and a class written anywhere else is never read. Create the project \
+             (KiCad: File > Save a Copy, or place the board inside a project) and retry.",
+            pro.display()
+        ))
+    })
+}
+
 /// Load the project JSON, refusing (rather than inventing a file KiCad never
 /// reads) when it is absent.
 fn load_project_settings(
     board_path: &std::path::Path,
 ) -> anyhow::Result<Result<(std::path::PathBuf, serde_json::Value), CallToolResult>> {
-    let pro = project_settings_path(board_path);
-    if !pro.exists() {
-        return Ok(Err(CallToolResult::error(format!(
-            "No project file at {} — net classes live in the .kicad_pro since KiCad 7, \
-             and a class written anywhere else is never read. Create the project \
-             (KiCad: File > Save a Copy, or place the board inside a project) and retry.",
-            pro.display()
-        ))));
+    if let Some(refusal) = missing_project_file(board_path) {
+        return Ok(Err(refusal));
     }
+    let pro = project_settings_path(board_path);
     let settings: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&pro)?)
         .map_err(|e| anyhow::anyhow!("{} is not valid JSON: {e}", pro.display()))?;
     Ok(Ok((pro, settings)))
 }
 
-/// The netclass writers' guard. Saving the board in KiCad also rewrites the
-/// project file from KiCad's own copy, so a netclass edit made here while it
-/// holds the board is reported and then silently reverted (#791). It runs
-/// before the read as well as the write: while KiCad holds the board, the
-/// file can be older than what KiCad holds, so even an answer that changes
-/// nothing would come from a stale copy.
-async fn refuse_while_kicad_holds_the_board(
-    ctx: &ToolContext,
-    board_path: &std::path::Path,
-) -> anyhow::Result<Option<CallToolResult>> {
-    crate::tools::pcb_board::refuse_if_board_open_in_kicad(ctx, board_path, "netclass change").await
+// ─── Net classes over KiCad's IPC API ────────────────────────────────────────
+//
+// While KiCad holds the board, its in-memory project is the authority: saving
+// the board rewrites the `.kicad_pro` from it (`PCB_EDIT_FRAME::SavePcbFile`
+// calls `SETTINGS_MANAGER::SaveProject`), so a file edit made underneath is
+// reverted (#791). `GetNetClasses` and `SetNetClasses` act on that project.
+// They name no document, so the board binding alone does not say which
+// project file they address; `on_boards_project` checks it.
+
+/// The project file KiCad's net-class commands act on, compared with the
+/// board's own.
+enum LiveProject<T> {
+    /// KiCad's loaded project is the board's sibling `.kicad_pro`.
+    Matches(T),
+    /// It is another one; carries what KiCad named.
+    Other(String),
 }
+
+/// Run `f` only when the project KiCad reports for the open board is
+/// `project_file`. KiCad 10.0 names the project in every open-document entry
+/// (`handleGetOpenDocuments`, `pcbnew/api/api_handler_pcb.cpp`).
+fn on_boards_project<T>(
+    document: &konnect_ipc::gen::kiapi::common::types::DocumentSpecifier,
+    project_file: &Path,
+    f: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<LiveProject<T>> {
+    let observed = document
+        .project
+        .as_ref()
+        .filter(|project| !project.name.is_empty() && !project.path.is_empty())
+        .map(|project| Path::new(&project.path).join(format!("{}.kicad_pro", project.name)));
+    let same = observed.as_ref().is_some_and(|observed| {
+        matches!(
+            (observed.canonicalize(), project_file.canonicalize()),
+            (Ok(a), Ok(b)) if a == b
+        )
+    });
+    if !same {
+        return Ok(LiveProject::Other(observed.map_or_else(
+            || "a board document that names no project".to_string(),
+            |path| path.display().to_string(),
+        )));
+    }
+    f().map(LiveProject::Matches)
+}
+
+fn wrong_project_refusal(project_file: &Path, observed: &str) -> CallToolResult {
+    CallToolResult::error_kind(
+        ToolErrorKind::WrongProject {
+            requested: project_file.display().to_string(),
+            open_projects: vec![observed.to_string()],
+        },
+        format!(
+            "KiCad holds this board, but reports its project as {observed}, not {}. KiCad's net \
+             class commands act on its loaded project, so Konnect neither read nor changed net \
+             classes over IPC, and did not touch the project file. Open the board through its \
+             own project in KiCad and retry.",
+            project_file.display()
+        ),
+    )
+}
+
+/// The PCB distances `SetNetClasses` can write, by KiCad's project-file key.
+const LIVE_NETCLASS_FIELDS: [&str; 7] = [
+    "clearance",
+    "track_width",
+    "via_diameter",
+    "via_drill",
+    "diff_pair_width",
+    "diff_pair_gap",
+    "diff_pair_via_gap",
+];
+
+/// Settings KiCad's API never reports (`NETCLASS::Serialize`,
+/// `common/netclass.cpp`), so a live read cannot say whether they are set.
+const NETCLASS_FIELDS_NOT_REPORTED_OVER_IPC: [&str; 3] =
+    ["microvia_diameter", "microvia_drill", "line_style"];
+
+fn live_field(class: &konnect_ipc::IpcNetClass, key: &str) -> Option<i64> {
+    match key {
+        "clearance" => class.clearance_nm,
+        "track_width" => class.track_width_nm,
+        "via_diameter" => class.via_diameter_nm,
+        "via_drill" => class.via_drill_nm,
+        "diff_pair_width" => class.diff_pair_width_nm,
+        "diff_pair_gap" => class.diff_pair_gap_nm,
+        "diff_pair_via_gap" => class.diff_pair_via_gap_nm,
+        other => unreachable!("{other} is not a live net class field"),
+    }
+}
+
+fn update_field<'a>(
+    update: &'a mut konnect_ipc::IpcNetClassUpdate,
+    key: &str,
+) -> &'a mut Option<i64> {
+    match key {
+        "clearance" => &mut update.clearance_nm,
+        "track_width" => &mut update.track_width_nm,
+        "via_diameter" => &mut update.via_diameter_nm,
+        "via_drill" => &mut update.via_drill_nm,
+        "diff_pair_width" => &mut update.diff_pair_width_nm,
+        "diff_pair_gap" => &mut update.diff_pair_gap_nm,
+        "diff_pair_via_gap" => &mut update.diff_pair_via_gap_nm,
+        other => unreachable!("{other} is not a live net class field"),
+    }
+}
+
+fn empty_update(name: &str, priority: i32) -> konnect_ipc::IpcNetClassUpdate {
+    konnect_ipc::IpcNetClassUpdate {
+        name: name.to_string(),
+        priority,
+        clearance_nm: None,
+        track_width_nm: None,
+        via_diameter_nm: None,
+        via_drill_nm: None,
+        diff_pair_width_nm: None,
+        diff_pair_gap_nm: None,
+        diff_pair_via_gap_nm: None,
+    }
+}
+
+/// Millimetres to KiCad's nanometres, rounded rather than truncated: 1.001 mm
+/// is 1000999.99… nm in binary floating point.
+fn mm_to_nm_rounded(mm: f64) -> i64 {
+    (mm * 1_000_000.0).round() as i64
+}
+
+fn nm_to_mm_json(nm: Option<i64>) -> serde_json::Value {
+    nm.map_or(serde_json::Value::Null, |nm| {
+        json!(konnect_ipc::builders::nm_to_mm(nm))
+    })
+}
+
+/// A live class in the shape `net_settings.classes` has in the project file,
+/// so one report serves both sources. Only the keys the class sets appear.
+fn project_shaped_class(class: &konnect_ipc::IpcNetClass) -> serde_json::Value {
+    let mut out = json!({ "name": class.name, "priority": class.priority });
+    for key in LIVE_NETCLASS_FIELDS {
+        if let Some(nm) = live_field(class, key) {
+            out[key] = nm_to_mm_json(Some(nm));
+        }
+    }
+    out
+}
+
+/// The Default's settings a live read sees unset. Wire and bus width count
+/// by presence only (see `IpcNetClass::has_wire_width`).
+fn live_default_missing_fields(default: &konnect_ipc::IpcNetClass) -> Vec<&'static str> {
+    let mut missing: Vec<&'static str> = LIVE_NETCLASS_FIELDS
+        .into_iter()
+        .filter(|key| live_field(default, key).is_none())
+        .collect();
+    if !default.has_wire_width {
+        missing.push("wire_width");
+    }
+    if !default.has_bus_width {
+        missing.push("bus_width");
+    }
+    missing
+}
+
+/// What one live `create_netclass` call did, as observed in KiCad.
+#[derive(Debug)]
+enum LiveNetclassWrite {
+    /// Every named value already held; nothing was sent.
+    Unchanged(konnect_ipc::IpcNetClass),
+    /// `SetNetClasses` was accepted and the classes were read back.
+    Applied {
+        before: Vec<konnect_ipc::IpcNetClass>,
+        after: Vec<konnect_ipc::IpcNetClass>,
+        sent: konnect_ipc::IpcNetClassUpdate,
+        created: bool,
+        repaired: Vec<&'static str>,
+    },
+    /// KiCad refused the write and a fresh read shows nothing changed.
+    Refused(String),
+    /// Nothing was sent: KiCad's answer cannot be updated without losing data.
+    Unwritable(String),
+    /// The write may have applied, and no readback proves what it did.
+    Uncertain(String),
+}
+
+/// `requested` is (key, value the caller named, value a new class takes), in
+/// nanometres.
+fn write_netclass_live(
+    client: &konnect_ipc::client::KiCadIpcClient,
+    name: &str,
+    requested: &[(&'static str, Option<i64>, i64)],
+) -> anyhow::Result<LiveNetclassWrite> {
+    let before = client.get_net_classes()?;
+    let is_default = name == DEFAULT_CLASS_NAME;
+    let mut repaired = Vec::new();
+    let (update, created) = match before.iter().find(|class| class.name == name) {
+        Some(class) => {
+            // KiCad assigns the priority from every message it receives, so
+            // one it did not report cannot be kept.
+            let Some(priority) = class.priority else {
+                return Ok(LiveNetclassWrite::Unwritable(format!(
+                    "KiCad reported net class '{name}' without a priority, and SetNetClasses \
+                     would reset it to 0"
+                )));
+            };
+            let mut update = empty_update(name, priority);
+            for (key, value, _) in requested {
+                if let Some(value) = value.filter(|value| live_field(class, key) != Some(*value)) {
+                    *update_field(&mut update, key) = Some(value);
+                }
+            }
+            // KiCad backfills other classes from the Default but never the
+            // Default itself, so a hole there is repaired here, as the file
+            // path does. Absent values only.
+            if is_default {
+                let seeded = kicad_default_class();
+                for key in LIVE_NETCLASS_FIELDS {
+                    let slot = update_field(&mut update, key);
+                    if live_field(class, key).is_none() && slot.is_none() {
+                        let mm = seeded[key].as_f64().expect("a seeded PCB distance");
+                        *slot = Some(mm_to_nm_rounded(mm));
+                        repaired.push(key);
+                    }
+                }
+            }
+            if LIVE_NETCLASS_FIELDS
+                .iter()
+                .all(|key| update_field(&mut update, key).is_none())
+            {
+                return Ok(LiveNetclassWrite::Unchanged(class.clone()));
+            }
+            (update, false)
+        }
+        None if is_default => {
+            return Ok(LiveNetclassWrite::Unwritable(
+                "KiCad reported no Default net class".to_string(),
+            ))
+        }
+        None => {
+            // -1 is what KiCad's NETCLASS constructor gives a new class.
+            let mut update = empty_update(name, -1);
+            for (key, value, default) in requested {
+                *update_field(&mut update, key) = Some(value.unwrap_or(*default));
+            }
+            (update, true)
+        }
+    };
+
+    if let Err(error) = client.set_net_classes(
+        std::slice::from_ref(&update),
+        konnect_ipc::IpcNetClassMergeMode::Merge,
+    ) {
+        // A request with no reply may have applied; the shared classification
+        // turns this into an outcome-unknown refusal.
+        if error
+            .downcast_ref::<konnect_ipc::client::IpcOutcomeUnknown>()
+            .is_some()
+        {
+            return Err(error);
+        }
+        let refusal = format!("{error:#}");
+        return Ok(match client.get_net_classes() {
+            Ok(now) if now == before => LiveNetclassWrite::Refused(refusal),
+            Ok(_) => LiveNetclassWrite::Uncertain(format!(
+                "KiCad refused SetNetClasses ({refusal}), and its net classes changed anyway"
+            )),
+            Err(read) => LiveNetclassWrite::Uncertain(format!(
+                "KiCad refused SetNetClasses ({refusal}), and the readback failed ({read:#})"
+            )),
+        });
+    }
+    Ok(match client.get_net_classes() {
+        Ok(after) => LiveNetclassWrite::Applied {
+            before,
+            after,
+            sent: update,
+            created,
+            repaired,
+        },
+        Err(read) => LiveNetclassWrite::Uncertain(format!(
+            "KiCad accepted SetNetClasses, and the readback failed ({read:#})"
+        )),
+    })
+}
+
+/// Compare KiCad's classes after a write with what the write asked for: the
+/// sent values, every other value of the class as it was, every other class
+/// untouched. Returns the class as read back, or what disagrees.
+fn verify_netclass_write(
+    before: &[konnect_ipc::IpcNetClass],
+    after: &[konnect_ipc::IpcNetClass],
+    sent: &konnect_ipc::IpcNetClassUpdate,
+    created: bool,
+) -> Result<konnect_ipc::IpcNetClass, String> {
+    let name = sent.name.as_str();
+    let Some(written) = after.iter().find(|class| class.name == name) else {
+        return Err(format!(
+            "net class '{name}' is absent from KiCad's readback"
+        ));
+    };
+    let previous = before.iter().find(|class| class.name == name);
+    let mut wrong = Vec::new();
+    if created && previous.is_some() {
+        wrong.push("it existed before it was created".to_string());
+    }
+    if written.priority != Some(sent.priority) {
+        wrong.push(format!(
+            "priority is {:?}, expected {}",
+            written.priority, sent.priority
+        ));
+    }
+    let mut sent = sent.clone();
+    for key in LIVE_NETCLASS_FIELDS {
+        let expected = update_field(&mut sent, key)
+            .or_else(|| previous.and_then(|class| live_field(class, key)));
+        let observed = live_field(written, key);
+        if observed != expected {
+            wrong.push(format!(
+                "{key} is {observed:?} nm, expected {expected:?} nm"
+            ));
+        }
+    }
+    let schematic_before = previous.map_or((false, false), |class| {
+        (class.has_wire_width, class.has_bus_width)
+    });
+    if (written.has_wire_width, written.has_bus_width) != schematic_before {
+        wrong.push("its schematic widths changed".to_string());
+    }
+    let others = |classes: &[konnect_ipc::IpcNetClass]| {
+        let mut rest: Vec<konnect_ipc::IpcNetClass> = classes
+            .iter()
+            .filter(|class| class.name != name)
+            .cloned()
+            .collect();
+        rest.sort_by(|a, b| a.name.cmp(&b.name));
+        rest
+    };
+    if others(before) != others(after) {
+        wrong.push("another net class changed".to_string());
+    }
+    if wrong.is_empty() {
+        Ok(written.clone())
+    } else {
+        Err(format!("net class '{name}': {}", wrong.join("; ")))
+    }
+}
+
+/// The change lives in KiCad's memory until the board is saved.
+const LIVE_NETCLASS_PERSISTENCE_NOTE: &str =
+    "KiCad holds this change in memory. It reaches the .kicad_pro when the board is saved \
+     (save_project, or File > Save in KiCad). KiCad does not mark the board modified for it, \
+     so closing the board without saving drops it without asking.";
 
 fn save_project_settings(
     pro: &std::path::Path,
@@ -1376,6 +1737,47 @@ fn kicad_default_class() -> serde_json::Value {
     })
 }
 
+/// KiCad's key, this tool's argument name, and the value a *new* class takes
+/// when the caller says nothing. The defaults belong to creation only:
+/// folding them in before an update turned "widen HV's track" into a silent
+/// reset of the clearance, drill and via size the caller had tuned.
+const CREATE_NETCLASS_FIELDS: [(&str, &str, f64); 4] = [
+    ("clearance", "clearance", 0.2),
+    ("track_width", "trace_width", 0.25),
+    ("via_drill", "via_drill", 0.4),
+    ("via_diameter", "via_diameter", 0.8),
+];
+
+/// Refuse a distance argument that is present but not a usable length. KiCad
+/// keeps net class distances as a C++ `int` of nanometres, so the upper bound
+/// is `i32::MAX` nm (about 2147 mm); the check runs before either path writes.
+fn check_netclass_distances(args: &serde_json::Value) -> Result<(), CallToolResult> {
+    for (_, arg, _) in CREATE_NETCLASS_FIELDS {
+        match &args[arg] {
+            serde_json::Value::Null => {}
+            value => match value.as_f64() {
+                Some(mm)
+                    if mm.is_finite()
+                        && mm >= 0.0
+                        && mm_to_nm_rounded(mm) <= i64::from(i32::MAX) => {}
+                Some(_) => {
+                    return Err(crate::tools::invalid_arg(
+                        arg,
+                        "must be a distance in mm from 0 to 2147",
+                    ))
+                }
+                None => {
+                    return Err(crate::tools::invalid_arg(
+                        arg,
+                        "must be a number of millimetres",
+                    ))
+                }
+            },
+        }
+    }
+    Ok(())
+}
+
 async fn handle_create_netclass(
     args: &serde_json::Value,
     ctx: &ToolContext,
@@ -1385,23 +1787,173 @@ async fn handle_create_netclass(
         Ok(v) => v.to_string(),
         Err(e) => return Ok(e),
     };
-    if let Some(refusal) = refuse_while_kicad_holds_the_board(ctx, &board_path).await? {
+    if let Err(refusal) = check_netclass_distances(args) {
         return Ok(refusal);
     }
-    // KiCad's key, this tool's argument name, and the value a *new* class
-    // takes when the caller says nothing. The defaults belong to creation
-    // only: folding them in before an update turned "widen HV's track" into a
-    // silent reset of the clearance, drill and via size the caller had tuned.
-    const FIELDS: [(&str, &str, f64); 4] = [
-        ("clearance", "clearance", 0.2),
-        ("track_width", "trace_width", 0.25),
-        ("via_drill", "via_drill", 0.4),
-        ("via_diameter", "via_diameter", 0.8),
-    ];
+    if let Some(refusal) = missing_project_file(&board_path) {
+        return Ok(refusal);
+    }
+    let pro = project_settings_path(&board_path);
+
+    let requested: Vec<(&'static str, Option<i64>, i64)> = CREATE_NETCLASS_FIELDS
+        .iter()
+        .map(|(key, arg, default)| {
+            (
+                *key,
+                opt_f64(args, arg).map(mm_to_nm_rounded),
+                mm_to_nm_rounded(*default),
+            )
+        })
+        .collect();
+    let live_name = name.clone();
+    let live_project = pro.clone();
+    let gate = crate::tools::pcb_board::live_or_closed_board(
+        ctx,
+        &board_path,
+        "netclass change",
+        move |client, document| {
+            on_boards_project(&document, &live_project, || {
+                write_netclass_live(client, &live_name, &requested)
+            })
+        },
+    )
+    .await?;
+    match gate {
+        LiveOrClosed::Refused(refusal) => Ok(refusal),
+        LiveOrClosed::Live(LiveProject::Other(observed)) => {
+            Ok(wrong_project_refusal(&pro, &observed))
+        }
+        LiveOrClosed::Live(LiveProject::Matches(outcome)) => {
+            Ok(report_live_netclass_write(&name, &pro, outcome))
+        }
+        LiveOrClosed::Closed(why) => create_netclass_in_file(args, &board_path, &name, &why),
+    }
+}
+
+/// Turn what KiCad did into the tool's answer, holding the readback to the
+/// request.
+fn report_live_netclass_write(
+    name: &str,
+    pro: &Path,
+    outcome: LiveNetclassWrite,
+) -> CallToolResult {
+    let is_default = name == DEFAULT_CLASS_NAME;
+    let uncertain = |reason: String| {
+        CallToolResult::error_kind(
+            ToolErrorKind::MutationOutcomeUncertain {
+                operation: "create_netclass".to_string(),
+                path: pro.display().to_string(),
+                reason: reason.clone(),
+            },
+            format!(
+                "KiCad may have changed net class '{name}', but a fresh GetNetClasses did not \
+                 prove the requested state: {reason}. Call get_netclasses to see what KiCad \
+                 holds before retrying. The project file was not written."
+            ),
+        )
+    };
+    let (class, changed, created, repaired) = match outcome {
+        LiveNetclassWrite::Unchanged(class) => (class, false, false, Vec::new()),
+        LiveNetclassWrite::Applied {
+            before,
+            after,
+            sent,
+            created,
+            repaired,
+        } => match verify_netclass_write(&before, &after, &sent, created) {
+            Ok(class) => (class, true, created, repaired),
+            Err(reason) => return uncertain(reason),
+        },
+        LiveNetclassWrite::Uncertain(reason) => return uncertain(reason),
+        LiveNetclassWrite::Refused(reason) => {
+            return CallToolResult::error_kind(
+                ToolErrorKind::EditorUnavailable {
+                    editor: "pcb".to_string(),
+                    reason: reason.clone(),
+                },
+                format!(
+                    "KiCad refused the net class change: {reason}. A fresh read shows its net \
+                     classes unchanged, and the project file was not written."
+                ),
+            )
+        }
+        LiveNetclassWrite::Unwritable(reason) => {
+            return CallToolResult::error_kind(
+                ToolErrorKind::UnsupportedCapability {
+                    capability: "set_net_classes".to_string(),
+                    kicad_version: None,
+                },
+                format!(
+                    "{reason}. Nothing was sent to KiCad and the project file was not written."
+                ),
+            )
+        }
+    };
+
+    let mut body = json!({
+        "created_netclass": name,
+        "updated_existing": !created,
+        "is_default": is_default,
+        "changed": changed,
+        "clearance": nm_to_mm_json(class.clearance_nm),
+        "trace_width": nm_to_mm_json(class.track_width_nm),
+        "via_drill": nm_to_mm_json(class.via_drill_nm),
+        "via_diameter": nm_to_mm_json(class.via_diameter_nm),
+        "priority": class.priority,
+        "source": board_source::FROM_IPC,
+        "file": pro.display().to_string(),
+        "persisted": false,
+        "readback": if changed {
+            "verified: GetNetClasses after the write shows the requested values, the class's \
+             other values and every other class unchanged"
+        } else {
+            "nothing was sent: KiCad already held every named value"
+        },
+        "note": format!(
+            "{LIVE_NETCLASS_PERSISTENCE_NOTE} Assign nets with assign_net_to_class, which needs \
+             the board closed in KiCad."
+        ),
+        "source_evidence": board_source::live_evidence(),
+    });
+    if is_default {
+        body["repaired_fields"] = json!(repaired);
+        // What this path cannot repair is reported, not hidden: wire and bus
+        // width have no unit KiCad's API states (`IpcNetClass::has_wire_width`).
+        let unrepaired: Vec<&str> = live_default_missing_fields(&class)
+            .into_iter()
+            .filter(|key| !LIVE_NETCLASS_FIELDS.contains(key))
+            .collect();
+        body["complete"] = json!(unrepaired.is_empty());
+        if !unrepaired.is_empty() {
+            body["refused_parts"] = json!([{
+                "kind": "unsupported_capability",
+                "fields": unrepaired,
+                "reason": "KiCad's IPC API carries schematic widths in an unstated unit, so \
+                           Konnect does not write them over IPC. A Default without wire_width \
+                           stops Eeschema placing junctions anywhere in the project.",
+                "next_step": "Close the board in KiCad and call create_netclass(name=\"Default\") \
+                              again; with the board closed it repairs the project file."
+            }]);
+        }
+        body["fields_not_checked"] = json!(NETCLASS_FIELDS_NOT_REPORTED_OVER_IPC);
+    }
+    CallToolResult::json(&body)
+}
+
+/// The closed-board path: edit `net_settings` in the `.kicad_pro`. `why` is
+/// the gate's evidence that no live KiCad holds the board.
+fn create_netclass_in_file(
+    args: &serde_json::Value,
+    board_path: &Path,
+    name: &str,
+    why: &NoLiveBoard,
+) -> anyhow::Result<CallToolResult> {
+    let name = name.to_string();
+    const FIELDS: [(&str, &str, f64); 4] = CREATE_NETCLASS_FIELDS;
     // Only the Default must be complete. Every other class may stay sparse.
     let is_default = name == DEFAULT_CLASS_NAME;
 
-    let (pro, mut settings) = match load_project_settings(&board_path)? {
+    let (pro, mut settings) = match load_project_settings(board_path)? {
         Ok(v) => v,
         Err(refusal) => return Ok(refusal),
     };
@@ -1510,7 +2062,11 @@ async fn handle_create_netclass(
         "is_default": is_default,
         "clearance": stored["clearance"], "trace_width": stored["track_width"],
         "via_drill": stored["via_drill"], "via_diameter": stored["via_diameter"],
+        "changed": changed,
+        "source": board_source::FROM_PROJECT_FILE,
         "file": pro.display().to_string(),
+        "persisted": true,
+        "fallback_reason": why.evidence(),
         "note": note
     })))
 }
@@ -1597,26 +2153,44 @@ async fn handle_get_netclasses(
         Err(refusal) => return Ok(refusal),
     };
 
-    let classes = settings["net_settings"]["classes"]
+    let file_classes = settings["net_settings"]["classes"]
         .as_array()
         .cloned()
         .unwrap_or_default();
+    // Patterns have one source whatever KiCad holds: its IPC API has no
+    // command that reads them (`project_commands.proto`), so they come from
+    // the `.kicad_pro` and are reported as such.
     let patterns = settings["net_settings"]["netclass_patterns"]
         .as_array()
         .cloned()
         .unwrap_or_default();
 
-    // Only the board nets have two possible sources. Definitions and patterns
-    // are project-file facts KiCad's IPC API has no complete equivalent for, so
-    // they are read from `.kicad_pro` either way and reported as such.
-    let observation =
-        board_source::read_board(ctx, &board_path, source, "net list", |client, document| {
-            client.get_nets_in(document)
-        })
-        .await?;
+    // Definitions and nets come from the live board where KiCad holds it,
+    // both in one observation so they describe the same editor state.
+    let live_project = pro.clone();
+    let observation = board_source::read_board(
+        ctx,
+        &board_path,
+        source,
+        "net class and net list read",
+        move |client, document| {
+            on_boards_project(&document, &live_project, || {
+                Ok((
+                    client.get_nets_in(document.clone())?,
+                    client.get_net_classes()?,
+                ))
+            })
+        },
+    )
+    .await?;
+    let mut live_classes: Option<Vec<konnect_ipc::IpcNetClass>> = None;
     let (net_names, nets_source, nets_note, evidence) = match observation {
         board_source::BoardRead::Refused(refusal) => return Ok(refusal),
-        board_source::BoardRead::Live(nets) => {
+        board_source::BoardRead::Live(LiveProject::Other(observed)) => {
+            return Ok(wrong_project_refusal(&pro, &observed))
+        }
+        board_source::BoardRead::Live(LiveProject::Matches((nets, classes))) => {
+            live_classes = Some(classes);
             // KiCad reports the unconnected pseudo-net as an empty name. It is
             // not a net a user has, and the saved-file reader drops it too.
             let mut names: Vec<String> = nets
@@ -1653,6 +2227,16 @@ async fn handle_get_netclasses(
     // Without a readable board the nets are unknown, not absent: the patterns
     // below that fit none of them are reported as null rather than all of them.
     let nets_readable = nets_source != board_source::FROM_UNAVAILABLE;
+
+    let classes: Vec<serde_json::Value> = match &live_classes {
+        Some(live) => live.iter().map(project_shaped_class).collect(),
+        None => file_classes,
+    };
+    let definitions_source = if live_classes.is_some() {
+        board_source::FROM_IPC
+    } else {
+        board_source::FROM_PROJECT_FILE
+    };
 
     // What an omitted key resolves to. A Default in the file is the whole
     // fallback, holes included; KiCad's seeded one applies only when the file
@@ -1715,20 +2299,32 @@ async fn handle_get_netclasses(
         // Nothing backfills the Default, so a key missing here is missing
         // project-wide — and KiCad reports none of it.
         if is_default {
-            let missing: Vec<&str> = seeded
-                .as_object()
-                .expect("kicad_default_class builds an object")
-                .keys()
-                .filter(|key| class.get(*key).is_none_or(|v| v.is_null()))
-                .map(String::as_str)
-                .collect();
+            // A live read sees fewer settings than the file holds, so it says
+            // which ones it could not check rather than calling them missing.
+            let live_default = live_classes
+                .as_ref()
+                .and_then(|live| live.iter().find(|c| c.name == DEFAULT_CLASS_NAME));
+            let missing: Vec<&str> = match live_default {
+                Some(live) => live_default_missing_fields(live),
+                None => seeded
+                    .as_object()
+                    .expect("kicad_default_class builds an object")
+                    .keys()
+                    .filter(|key| class.get(*key).is_none_or(|v| v.is_null()))
+                    .map(String::as_str)
+                    .collect(),
+            };
             if !missing.is_empty() {
-                entry["note"] = json!(format!(
+                entry["note"] = json!(
                     "Incomplete Default: KiCad resolves these from nothing. Repair with \
-                     create_netclass(name=\"Default\")."
-                ));
+                     create_netclass(name=\"Default\"); a missing wire_width or bus_width \
+                     needs the board closed in KiCad for that call."
+                );
             }
             entry["missing_fields"] = json!(missing);
+            if live_default.is_some() {
+                entry["fields_not_checked"] = json!(NETCLASS_FIELDS_NOT_REPORTED_OVER_IPC);
+            }
         }
         out.push(entry);
     }
@@ -1790,10 +2386,17 @@ async fn handle_get_netclasses(
                  highest-priority class that sets it and falls back to Default. Lower \
                  priority numbers rank higher.",
     });
+    if live_classes.is_some() {
+        body["patterns_note"] = json!(
+            "KiCad's IPC API has no command that reads netclass patterns, so these come from \
+             the .kicad_pro as last saved. Pattern edits made in KiCad since the last save \
+             are not included, and matched_nets is derived from these patterns."
+        );
+    }
     board_source::provenance(
         &mut body,
         json!({
-            "definitions": board_source::FROM_PROJECT_FILE,
+            "definitions": definitions_source,
             "patterns": board_source::FROM_PROJECT_FILE,
             "board_nets": nets_source,
             "matched_nets": board_source::FROM_DERIVED,
@@ -1824,9 +2427,33 @@ async fn handle_assign_net_to_class(
         Ok(v) => v.to_string(),
         Err(e) => return Ok(e),
     };
-    if let Some(refusal) = refuse_while_kicad_holds_the_board(ctx, &board_path).await? {
-        return Ok(refusal);
-    }
+    // Membership is a pattern, and KiCad's IPC API has no command that reads
+    // or writes patterns, so a board KiCad holds is refused rather than its
+    // project file edited underneath it.
+    let why = match crate::tools::pcb_board::live_or_closed_board(
+        ctx,
+        &board_path,
+        "netclass assignment check",
+        |_, _| Ok(()),
+    )
+    .await?
+    {
+        LiveOrClosed::Refused(refusal) => return Ok(refusal),
+        LiveOrClosed::Live(()) => {
+            return Ok(CallToolResult::error_kind(
+                ToolErrorKind::UnsupportedCapability {
+                    capability: "netclass_pattern_assignment_over_ipc".to_string(),
+                    kicad_version: None,
+                },
+                "KiCad currently holds this board open, and its IPC API has no command for \
+                 netclass pattern assignments (SetNetClasses carries class definitions only). \
+                 Konnect did not write the .kicad_pro, because KiCad's next save rewrites it from \
+                 its own copy. Assign the net in KiCad's Board Setup, Net Classes page, or close \
+                 the board in KiCad and retry.",
+            ))
+        }
+        LiveOrClosed::Closed(why) => why,
+    };
 
     let (pro, mut settings) = match load_project_settings(&board_path)? {
         Ok(v) => v,
@@ -1881,7 +2508,9 @@ async fn handle_assign_net_to_class(
                 "already_assigned": true,
                 "net_name": net_name,
                 "netclass": netclass,
-                "file": pro.display().to_string()
+                "source": board_source::FROM_PROJECT_FILE,
+                "file": pro.display().to_string(),
+                "fallback_reason": why.evidence()
             })));
         }
         previous_class = entry["netclass"].as_str().map(String::from);
@@ -1896,7 +2525,9 @@ async fn handle_assign_net_to_class(
         "net_name": net_name,
         "netclass": netclass,
         "previous_class": previous_class,
-        "file": pro.display().to_string()
+        "source": board_source::FROM_PROJECT_FILE,
+        "file": pro.display().to_string(),
+        "fallback_reason": why.evidence()
     })))
 }
 
@@ -3057,6 +3688,110 @@ mod netclass_tests {
         let msg = text_of(&result);
         assert!(msg.contains("HV"), "{msg}");
         assert_eq!(std::fs::read_to_string(&board).unwrap(), BOARD);
+    }
+
+    // ─── Live readback ───────────────────────────────────────────────────────
+
+    fn live(name: &str, priority: i32, clearance: Option<i64>) -> konnect_ipc::IpcNetClass {
+        konnect_ipc::IpcNetClass {
+            name: name.into(),
+            priority: Some(priority),
+            clearance_nm: clearance,
+            ..Default::default()
+        }
+    }
+
+    fn sent(name: &str, priority: i32, clearance: Option<i64>) -> konnect_ipc::IpcNetClassUpdate {
+        let mut update = empty_update(name, priority);
+        update.clearance_nm = clearance;
+        update
+    }
+
+    #[test]
+    fn a_readback_holding_the_request_and_nothing_else_is_accepted() {
+        let before = vec![
+            live("Default", i32::MAX, Some(200_000)),
+            live("HV", 2, None),
+        ];
+        let hv = live("HV", 2, Some(500_000));
+        let after = vec![before[0].clone(), hv.clone()];
+
+        let written = verify_netclass_write(&before, &after, &sent("HV", 2, Some(500_000)), false)
+            .expect("the readback holds the request");
+        assert_eq!(written, hv);
+    }
+
+    #[test]
+    fn a_readback_with_the_old_value_is_a_mismatch_naming_the_field() {
+        let before = vec![live("HV", 2, Some(300_000))];
+        let reason = verify_netclass_write(&before, &before, &sent("HV", 2, Some(500_000)), false)
+            .expect_err("KiCad kept the old value");
+        assert!(reason.contains("clearance"), "{reason}");
+    }
+
+    /// A class the caller did not name must come back as it was.
+    #[test]
+    fn a_readback_where_another_class_changed_is_a_mismatch() {
+        let before = vec![
+            live("Default", i32::MAX, Some(200_000)),
+            live("HV", 2, None),
+        ];
+        let after = vec![
+            live("Default", i32::MAX, Some(100_000)),
+            live("HV", 2, Some(500_000)),
+        ];
+        let reason = verify_netclass_write(&before, &after, &sent("HV", 2, Some(500_000)), false)
+            .expect_err("the Default changed");
+        assert!(reason.contains("another net class"), "{reason}");
+    }
+
+    /// An update that names one value must not lose the others or the
+    /// priority, which KiCad takes from every message.
+    #[test]
+    fn a_readback_that_lost_an_unnamed_value_or_the_priority_is_a_mismatch() {
+        let mut before = live("HV", 2, Some(300_000));
+        before.track_width_nm = Some(250_000);
+        let after = live("HV", 0, Some(300_000));
+        let reason = verify_netclass_write(&[before], &[after], &sent("HV", 2, None), false)
+            .expect_err("track width and priority were lost");
+        assert!(reason.contains("track_width"), "{reason}");
+        assert!(reason.contains("priority"), "{reason}");
+    }
+
+    #[test]
+    fn a_class_missing_from_the_readback_is_a_mismatch() {
+        let reason = verify_netclass_write(&[], &[], &sent("HV", -1, Some(1)), true)
+            .expect_err("nothing came back");
+        assert!(reason.contains("absent"), "{reason}");
+    }
+
+    /// The handler's own range check, for direct calls the schema never sees.
+    #[test]
+    fn distances_are_checked_before_any_write() {
+        for (args, field) in [
+            (json!({ "clearance": -0.1 }), "clearance"),
+            (json!({ "trace_width": "0.3" }), "trace_width"),
+            (json!({ "via_drill": 3000.0 }), "via_drill"),
+        ] {
+            let refusal = check_netclass_distances(&args).expect_err("refused");
+            assert_eq!(
+                crate::mcp::error::extract_error_kind(&refusal).as_deref(),
+                Some("invalid_argument"),
+                "{field}"
+            );
+            assert!(text_of(&refusal).contains(field), "{field}");
+        }
+        assert!(
+            check_netclass_distances(&json!({ "clearance": 0.0, "via_drill": 2147.0 })).is_ok()
+        );
+    }
+
+    /// 1.001 mm is 1000999.99… nm in floating point; truncating would send
+    /// KiCad a value one nanometre short of the request.
+    #[test]
+    fn millimetres_round_to_the_nearest_nanometre() {
+        assert_eq!(mm_to_nm_rounded(1.001), 1_001_000);
+        assert_eq!(mm_to_nm_rounded(0.25), 250_000);
     }
 }
 

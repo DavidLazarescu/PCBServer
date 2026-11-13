@@ -13,8 +13,8 @@ use crate::tool;
 use crate::tools::board_source::{self, BoardSource};
 use crate::tools::live_board::{self, LiveBoard};
 use crate::tools::{
-    get_path, opt_str_list, require_f64, require_str, with_board_ipc_classified, ToolContext,
-    ToolDef,
+    get_path, opt_str_list, require_f64, require_str, with_board_ipc_classified,
+    BoardEditorAbsence, ToolContext, ToolDef,
 };
 use konnect_ipc::builders;
 use konnect_sexp::{
@@ -210,6 +210,10 @@ pub(crate) enum NoLiveBoard {
     /// KiCad answered and holds another project, or none. Carries that
     /// answer, which names the boards it does hold.
     NotOpen(String),
+    /// KiCad answered without naming any board document, and this process
+    /// never saw this board live. Only [`live_or_closed_board`] produces it;
+    /// [`attempt_ipc_write`] refuses that answer instead.
+    NoBoardEditor(BoardEditorAbsence),
 }
 
 impl NoLiveBoard {
@@ -218,6 +222,7 @@ impl NoLiveBoard {
         match self {
             Self::Unreachable => "KiCad IPC is unreachable.".to_string(),
             Self::NotOpen(answer) => format!("KiCad is reachable but {answer}."),
+            Self::NoBoardEditor(absence) => format!("KiCad is running but {}.", absence.observed()),
         }
     }
 
@@ -232,6 +237,10 @@ impl NoLiveBoard {
                 "kind": "board_not_open",
                 "message": answer
             }),
+            Self::NoBoardEditor(absence) => json!({
+                "kind": absence.reason_code(),
+                "message": format!("KiCad is running but {}.", absence.observed())
+            }),
         }
     }
 
@@ -243,6 +252,9 @@ impl NoLiveBoard {
                 "KiCad IPC was unreachable, so Konnect could not contact a live editor; no exact-board sibling lock was present.".to_string()
             }
             Self::NotOpen(answer) => format!("KiCad was reachable, and {answer}"),
+            Self::NoBoardEditor(absence) => {
+                format!("KiCad was reachable, and it {}.", absence.observed())
+            }
         };
         format!(
             "{observed} This board has not been observed live during the current Konnect server \
@@ -438,6 +450,98 @@ pub(crate) async fn refuse_if_board_open_in_kicad(
             } => Some(lost_board_refusal(board_path, situation, ipc_unreachable)),
         },
     )
+}
+
+/// What a tool that edits a board both ways may do: through KiCad when it
+/// holds the board, through the saved file when nothing live does.
+pub(crate) enum LiveOrClosed<T> {
+    /// KiCad holds the exact requested board and `f` ran against it.
+    Live(T),
+    /// No live KiCad holds this board, so its files are authoritative.
+    Closed(NoLiveBoard),
+    /// Neither path is safe; return this and touch no file.
+    Refused(CallToolResult),
+}
+
+/// Run `f` against the exact board when KiCad holds it, or say why the file
+/// may be edited instead.
+///
+/// For the `.kicad_pro` writers that gained a live path. Their closed-board
+/// behaviour stays that of [`refuse_if_board_open_in_kicad`], which they used
+/// before: an endpoint with no board editor and a KiCad holding another board
+/// both leave the file to them. Two answers differ, because there is now a
+/// live call to fail:
+///
+/// * KiCad named the board and then refused or did not finish `f` (or refused
+///   to name its documents at all). That is a refusal: a failed live call is
+///   never answered by writing the file under the editor.
+/// * An endpoint with no board editor, after this process watched KiCad hold
+///   the board, is the loss [`board_source::read_board`] refuses too.
+pub(crate) async fn live_or_closed_board<T, F>(
+    ctx: &ToolContext,
+    board_path: &std::path::Path,
+    what: &str,
+    f: F,
+) -> anyhow::Result<LiveOrClosed<T>>
+where
+    T: Send + 'static,
+    F: FnOnce(
+            &konnect_ipc::client::KiCadIpcClient,
+            konnect_ipc::gen::kiapi::common::types::DocumentSpecifier,
+        ) -> anyhow::Result<T>
+        + Send
+        + 'static,
+{
+    Ok(match live_board::observe(ctx, board_path, f).await? {
+        LiveBoard::Answered(value) => LiveOrClosed::Live(value),
+        LiveBoard::Uncertain(message) => {
+            LiveOrClosed::Refused(crate::tools::ipc_uncertain_result(&message))
+        }
+        LiveBoard::Recovered(message) => {
+            LiveOrClosed::Refused(crate::tools::ipc_recovered_result(&message))
+        }
+        LiveBoard::Rejected(message) => LiveOrClosed::Refused(CallToolResult::error_kind(
+            ToolErrorKind::EditorUnavailable {
+                editor: "pcb".to_string(),
+                reason: message.clone(),
+            },
+            format!(
+                "KiCad did not complete the {what} for this board: {message}. No file was \
+                 modified: KiCad is reachable and may hold this board, so its saved files are \
+                 not a substitute. Retry once KiCad answers."
+            ),
+        )),
+        LiveBoard::Unresolved(error) => {
+            LiveOrClosed::Refused(crate::tools::ipc_target_error_result(&error))
+        }
+        LiveBoard::NotOpen { message, .. } => LiveOrClosed::Closed(NoLiveBoard::NotOpen(message)),
+        LiveBoard::Unserved {
+            absence,
+            observed_live,
+            ..
+        } => {
+            if observed_live {
+                LiveOrClosed::Refused(unsafe_file_fallback(
+                    board_path,
+                    live_board::PREVIOUSLY_OBSERVED_LIVE,
+                    &format!(
+                        "Konnect previously reached KiCad with this board open, and KiCad now {}.",
+                        absence.observed()
+                    ),
+                ))
+            } else {
+                LiveOrClosed::Closed(NoLiveBoard::NoBoardEditor(absence))
+            }
+        }
+        LiveBoard::NeverReached(_) => match board_lock_refusal(board_path) {
+            Some(refusal) => LiveOrClosed::Refused(refusal),
+            None => LiveOrClosed::Closed(NoLiveBoard::Unreachable),
+        },
+        LiveBoard::LostAfterObservation {
+            situation,
+            ipc_unreachable,
+        } => LiveOrClosed::Refused(lost_board_refusal(board_path, situation, ipc_unreachable)),
+    })
 }
 
 // ─── Zone construction, shared by `add_zone` and its `add_copper_pour` alias ──
@@ -3005,6 +3109,31 @@ pub(crate) mod board_mock {
                 kiapi::common::types::document_specifier::Identifier::BoardFilename(
                     filename.to_string(),
                 ),
+            ),
+        }
+    }
+
+    /// An open PCB document exactly as KiCad 10.0 sends it
+    /// (`handleGetOpenDocuments`): the bare board filename, and the project
+    /// named by its directory and its name, here the board's own stem.
+    pub fn board_document_in_project(
+        board: &std::path::Path,
+    ) -> kiapi::common::types::DocumentSpecifier {
+        let text = |part: Option<&std::ffi::OsStr>| {
+            part.expect("a board path with a name and a directory")
+                .to_string_lossy()
+                .into_owned()
+        };
+        kiapi::common::types::DocumentSpecifier {
+            r#type: kiapi::common::types::DocumentType::DoctypePcb as i32,
+            project: Some(kiapi::common::types::ProjectSpecifier {
+                name: text(board.file_stem()),
+                path: text(board.parent().map(std::path::Path::as_os_str)),
+            }),
+            identifier: Some(
+                kiapi::common::types::document_specifier::Identifier::BoardFilename(text(
+                    board.file_name(),
+                )),
             ),
         }
     }
