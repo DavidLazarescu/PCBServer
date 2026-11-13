@@ -2467,11 +2467,15 @@ async fn handle_add_mounting_hole(
     }
 }
 
-/// Read `layer` (required when there is no `default`), refusing a name KiCad
-/// has no board layer for before the IPC or file path runs (#844). KiCad 10
-/// does not validate an item's layer, and answered `BL_UNDEFINED` in footprint
-/// graphics with a crash (#237); it also refuses to load a board whose items
-/// name an undefined layer.
+/// Read `layer` (required when there is no `default`) as its canonical name,
+/// refusing a name KiCad has no board layer for before the IPC or file path
+/// runs (#844). KiCad 10 does not validate an item's layer, and answered
+/// `BL_UNDEFINED` in footprint graphics with a crash (#237); it also refuses
+/// to load a board whose items name an undefined layer.
+///
+/// An alias such as `F.Silkscreen`, `User.Drawings` or `In01.Cu` names a real
+/// layer, but KiCad 10 refuses to load a board item that uses it (#849), so
+/// both paths get the canonical name (`F.SilkS`, `Dwgs.User`, `In1.Cu`).
 fn board_layer_arg(
     args: &serde_json::Value,
     default: Option<&str>,
@@ -2480,7 +2484,10 @@ fn board_layer_arg(
         Some(default) if args["layer"].is_null() => default,
         _ => require_str(args, "layer")?,
     };
-    if builders::try_layer_from_name(layer).is_err() {
+    let canonical = builders::try_layer_from_name(layer)
+        .ok()
+        .and_then(builders::layer_name);
+    let Some(canonical) = canonical else {
         return Err(invalid_arg(
             "layer",
             &format!(
@@ -2488,8 +2495,8 @@ fn board_layer_arg(
                  In1.Cu..In30.Cu, F.SilkS, B.SilkS, Edge.Cuts or User.1..User.45"
             ),
         ));
-    }
-    Ok(layer.to_string())
+    };
+    Ok(canonical.to_string())
 }
 
 #[cfg(test)]

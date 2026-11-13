@@ -3,6 +3,17 @@
 Konnect's tool schemas are public API. This file records intentional argument
 removals and the supported replacement workflow.
 
+## Unreleased: board text, logo and zone writers write a layer alias by its canonical name (patch release)
+
+`add_board_text`, `import_svg_logo`, `add_zone` and `add_copper_pour` accept
+layer aliases such as `F.Silkscreen`, `F.Courtyard`, `User.Drawings` or
+`In01.Cu`. Over IPC an alias already reached KiCad as its layer, but the board
+file fallback wrote it into `(layer "...")` as given, and KiCad 10 refuses to
+load a board whose item names a layer that way. Both paths now use the
+canonical name (`F.SilkS`, `F.CrtYd`, `Dwgs.User`, `In1.Cu`), and the
+response's `layer` field reports that name instead of echoing the argument.
+Canonical names behave as before (#849).
+
 ## Unreleased: board text, logo and zone writers refuse an unknown layer (patch release)
 
 `add_board_text`, `import_svg_logo`, `add_zone` and `add_copper_pour` now

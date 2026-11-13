@@ -1,7 +1,9 @@
-//! Board writers refuse a layer KiCad has no board layer for (#844).
+//! Board writers refuse a layer KiCad has no board layer for (#844), and write
+//! an alias by its canonical name (#849).
 //!
 //! `add_board_text`, `import_svg_logo` and `add_zone`/`add_copper_pour` used to
 //! send an unknown name to KiCad as `BL_UNDEFINED`, or write it into the file.
+//! They also wrote an alias such as `F.Silkscreen` into the file as given.
 //! Each case runs through served `tools/call`, once against a KiCad double
 //! holding the board and once with no KiCad, on a board KiCad 10 saved (see
 //! `tests/fixtures/six_layer_power_planes_kicad10.README.md` for the oracle).
@@ -276,5 +278,64 @@ async fn a_known_layer_is_still_written_to_the_file() {
             before.matches(written).count() + 1,
             "{tool}"
         );
+    }
+}
+
+/// Aliases KiCad 10 refuses on a board item although they name a real layer
+/// (fixture README), with the canonical name KiCad loads.
+const ALIASES: [(&str, &str, &str); 5] = [
+    ("add_board_text", "F.Silkscreen", "F.SilkS"),
+    ("add_board_text", "User.Drawings", "Dwgs.User"),
+    ("import_svg_logo", "B.Silkscreen", "B.SilkS"),
+    ("add_zone", "In01.Cu", "In1.Cu"),
+    ("add_copper_pour", "In+2.Cu", "In2.Cu"),
+];
+
+/// The file fallback writes and reports the canonical name, never the alias.
+#[tokio::test]
+async fn an_alias_is_written_by_its_canonical_name() {
+    let scene = Scene::new(false).await;
+    for (tool, alias, canonical) in ALIASES {
+        let before = std::fs::read_to_string(&scene.board).unwrap();
+        let count = |text: &str, name: &str| text.matches(&format!("\"{name}\"")).count();
+
+        let result = scene.call(tool, Some(alias)).await;
+
+        let case = format!("{tool} {alias}");
+        assert!(!result.is_error, "{case}: {:?}", result.content);
+        let body = body(&result);
+        assert_eq!(body["source"], "file", "{case}");
+        assert_eq!(body["layer"], canonical, "{case}");
+        let after = std::fs::read_to_string(&scene.board).unwrap();
+        assert_eq!(count(&after, alias), count(&before, alias), "{case}");
+        assert_eq!(
+            count(&after, canonical),
+            count(&before, canonical) + 1,
+            "{case}"
+        );
+    }
+}
+
+/// Over IPC an alias already reached KiCad as its layer; the reply now names
+/// the layer the way the board file does.
+#[tokio::test]
+async fn an_alias_reaches_kicad_as_its_layer_and_is_reported_canonically() {
+    let scene = Scene::new(true).await;
+    for (tool, alias, canonical) in ALIASES {
+        let result = scene.call(tool, Some(alias)).await;
+
+        let case = format!("{tool} {alias}");
+        assert!(!result.is_error, "{case}: {:?}", result.content);
+        let body = body(&result);
+        assert_eq!(body["source"], "ipc", "{case}");
+        assert_eq!(body["layer"], canonical, "{case}");
+        let created: Vec<_> = scene
+            .take_received()
+            .into_iter()
+            .filter(|(name, _)| name == "CreateItems")
+            .collect();
+        let expected = konnect_ipc::builders::layer_from_name(canonical) as i32;
+        assert_eq!(created.len(), 1, "{case}");
+        assert_eq!(created[0].1, vec![expected], "{case}");
     }
 }
