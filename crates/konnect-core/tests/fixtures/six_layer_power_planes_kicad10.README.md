@@ -41,3 +41,44 @@ layer (10 declared, 9 by substring); this fixture makes the gap unmissable.
 
 `crates/konnect-core/src/tools/manufacturing.rs`, module
 `copper_layer_count_tests`.
+
+`crates/konnect-core/src/tools/board_layer_refusal_tests.rs` (#844) uses the board
+as KiCad's own serialization to write into, and as the oracle for which layer
+names KiCad accepts on a board item.
+
+## Layer names KiCad loads on an item (#844)
+
+One `(gr_text "LOGO" (at 10 10 0) (layer "<name>") …)` was inserted before the
+board's closing paren, then loaded with KiCad 10.0.6:
+
+```text
+kicad-cli pcb export svg --layers F.SilkS,Edge.Cuts -o out.svg t.kicad_pcb
+```
+
+| `<name>` | KiCad 10.0.6 |
+|---|---|
+| `F.SilkS` | loads, plots |
+| `F.Silk` | `Failed to load board: One or more items were found on undefined layers (F.Silk).` |
+| `Not.A.Layer` | `Failed to load board: … undefined layers (Not.A.Layer).` |
+
+The tests refuse the two rejected names and still write `F.SilkS`.
+
+## Layer aliases KiCad refuses on an item (#849)
+
+The same insertion, loaded with KiCad 10.0.8:
+
+```text
+kicad-cli pcb export svg --layers Edge.Cuts --mode-single -o out.svg t.kicad_pcb
+```
+
+| `<name>` | KiCad 10.0.8 exit status |
+|---|---|
+| `F.SilkS`, `In1.Cu`, `User.1` | 0, loads |
+| `F.Silkscreen`, `B.Silkscreen`, `F.Courtyard`, `F.Adhesive` | 3, does not load |
+| `User.Drawings`, `User.Comments`, `User.Eco1`, `User.Eco2` | 3, does not load |
+| `In01.Cu`, `In+1.Cu`, `User.01` | 3, does not load |
+
+The board's own table names some of these as display names
+(`(5 "F.SilkS" user "F.Silkscreen")`), but an item has to use the canonical
+name. The tests give each tool an alias and check that the canonical name is
+what is written and reported.

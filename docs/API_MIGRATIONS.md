@@ -3,6 +3,164 @@
 Konnect's tool schemas are public API. This file records intentional argument
 removals and the supported replacement workflow.
 
+## Unreleased: footprint flips mirror inner copper layers (patch release)
+
+A footprint that changes sides now moves its inner copper items the way KiCad's
+`FlipLayer` does. On N copper layers, `In<k>.Cu` goes to `In<N-1-k>.Cu`, so
+`In2.Cu` and `In5.Cu` swap on an 8-layer board. Both side changes are covered:
+`flip_component` on a closed board, and `update_footprints_from_library` on a
+back-side footprint. Both used to leave inner layers where they were. The
+refresh now also mirrors text on inner copper, as KiCad does. Wildcard, user
+and other non-copper layers are unchanged, and so are a pad's
+`zone_layer_connections`, which KiCad's own flip also leaves alone.
+
+When an inner layer the footprint uses is not on the board (`In5.Cu` on a
+4-layer board), both refuse instead of following KiCad, which clamps it to
+`In1.Cu`. `flip_component` returns `plan_blocked` with `operation:
+"flip_component"` and leaves the file unchanged. The library refresh reports a
+`footprint_update_conflict` diagnostic for that reference.
+
+The file flip reads the stack from the board's `(layers …)` table, or assumes
+KiCad's two-layer default when there is none. It returns `plan_blocked` for a
+table whose copper layers are not `F.Cu`, `In1.Cu`..`In<N-2>.Cu` and `B.Cu`,
+and refuses a board with two tables or a pad with a per-layer `(padstack …)`,
+whose inner entries KiCad would also move. The refresh takes KiCad's
+copper-layer count, and its `plan_revision` now includes that count, so a
+revision from an earlier build needs a new dry run. The native IPC flip is
+unchanged (#831).
+
+## Unreleased: `rename_project` refuses a file that changed mid-rename (patch release)
+
+`rename_project` used to read each file it rewrites and write it back
+unconditionally. If KiCad or another writer saved one of them in between, the
+rename replaced that save with the older copy plus the new name, and reported
+success.
+
+It now reads every file before renaming any, and rewrites them in one journaled
+transaction that replaces a file only if it still holds what was read. If one
+changed, or KiCad opened one under its new name, nothing is rewritten, the
+renames are undone, and the call returns `conflict` naming that file under its
+old name. Retry the rename. As with other writes, a KiCad lock on a board
+returns `unsafe_file_fallback` rather than `conflict`.
+
+Three refusals now come before anything moves:
+
+- KiCad holds one of the files under its old name (a `~NAME.kicad_sch.lck` or
+  `~NAME.kicad_pcb.lck` beside it). Its next save would recreate the old name,
+  outside the renamed project. Close the project in KiCad first.
+- A file cannot be read.
+- A `.konnect-transaction-*.json` journal left by an earlier interrupted call
+  cannot be recovered. Use `konnect transaction status` to inspect it.
+
+When the outcome cannot be proven, the call returns
+`mutation_outcome_uncertain`. This happens when the transaction fails after its
+journal was written (the `path` is that journal, and the files stay renamed), or
+when undoing the renames fails. Arguments and the success response are unchanged
+(#851).
+
+## Unreleased: board file fallbacks refuse a board that changed mid-edit (patch release)
+
+`add_layer` always edits the saved board file. `set_board_size`,
+`add_board_outline`, `delete_graphics`, `add_board_text`, `add_zone`,
+`add_copper_pour` and `import_svg_logo` edit it when no live KiCad holds the
+board. They used to read the file, splice in the edit and replace it
+unconditionally, so a save that landed in between (KiCad's autosave, an editor,
+another call) was overwritten with an edit of the older read, and the call
+still reported success.
+
+The write now goes through only while the file still holds the bytes the edit
+was read from. Otherwise the call returns `conflict` with the board in `paths`
+and leaves the newer file as it is; reload and retry. If the file no longer
+holds the edit when read back after the write, the call returns
+`mutation_outcome_uncertain`; reload and inspect the board before retrying.
+Successful responses and the IPC path are unchanged (#845).
+
+## Unreleased: board text, logo and zone writers write a layer alias by its canonical name (patch release)
+
+`add_board_text`, `import_svg_logo`, `add_zone` and `add_copper_pour` accept
+layer aliases such as `F.Silkscreen`, `F.Courtyard`, `User.Drawings` or
+`In01.Cu`. Over IPC an alias already reached KiCad as its layer, but the board
+file fallback wrote it into `(layer "...")` as given, and KiCad 10 refuses to
+load a board whose item names a layer that way. Both paths now use the
+canonical name (`F.SilkS`, `F.CrtYd`, `Dwgs.User`, `In1.Cu`), and the
+response's `layer` field reports that name instead of echoing the argument.
+Canonical names behave as before (#849).
+
+## Unreleased: board text, logo and zone writers refuse an unknown layer (patch release)
+
+`add_board_text`, `import_svg_logo`, `add_zone` and `add_copper_pour` now
+refuse a `layer` KiCad has no board layer for, such as the typo `F.Silk`, as
+`invalid_argument` with `field: "layer"`. Before, a live KiCad was sent the
+item on `BL_UNDEFINED`, which KiCad 10 does not validate (#237), and the file
+fallback wrote the name into the board, which KiCad 10.0.6 then refuses to
+load. The refusal comes before KiCad is asked anything or the board is read,
+so neither changes. Every name these tools accepted and KiCad also accepts
+still works, and the `F.SilkS` default is unchanged. Response shapes are
+unchanged (#844).
+
+## Unreleased: `export_specctra_dsn` exports rounded-rectangle pads (minor release)
+
+`export_specctra_dsn` refused any board with a `roundrect` pad, which covers
+most stock SMD footprints. It now exports them. Specctra has no rounded
+rectangle, so the DSN carries each one as a polygon, as KiCad's own exporter
+does. The polygon's edges are tangent to the corner arcs, so it encloses the
+rounded rectangle and stands at most about 1 µm outside it. As for every pad
+shape, the pad's size is first rounded to the micrometre (#790).
+
+What changes for a caller:
+
+- The response's `capabilities.supported_profile` is now
+  `two_layer_front_side_circle_rect_roundrect_no_existing_routing_or_zones`;
+  it was `two_layer_front_side_circle_rect_no_existing_routing_or_zones`.
+- In the reverse manifest, `supported_profile.pad_shapes` lists `roundrect`.
+  A rounded-rectangle padstack has `"shape": "roundrect"` and a new
+  `corner_radius_um`: KiCad's `min(width, height) * roundrect_rratio`, rounded
+  down to the micrometre. Circle, rect and via padstacks keep their old
+  fields. `plan_specctra_ses_import` and `apply_specctra_ses` accept both
+  forms.
+- A chamfered pad, which KiCad also writes as `roundrect`, is still refused,
+  now with `pad <ref>-<n> has chamfered corners`.
+- With `native_bridge_mode` `prefer` or `require`, KiCad's polygon for a
+  rounded-rectangle pad is checked against the pad, not against the Rust
+  polygon, because the two exporters approximate the corners differently. The
+  polygon may sit inside the pad by KiCad's default 5 µm arc error and outside
+  it by the corner growth KiCad's exporter adds. A project whose maximum arc
+  error is set above 5 µm fails this check, so `require` refuses and `prefer`
+  falls back to the Rust export. Circle and rect pads still have to match
+  exactly. KiCad's native DSN of most stock footprints is still refused before
+  this check, for reasons unrelated to pad shape (#841).
+
+## Unreleased: `export_specctra_dsn` refuses per-layer padstacks (patch release)
+
+A KiCad 10 pad in `front_inner_back` or `custom` padstack mode can have a
+different shape or size on `B.Cu` and the inner layers. The exporter read only
+the front geometry and wrote it on every copper layer, so Freerouting routed
+against copper the board does not have. KiCad 10.0.6's own DSN exporter does
+the same, so the native bridge is no remedy.
+
+`export_specctra_dsn` now refuses such a pad, or a locked via with such a
+padstack, under every `native_bridge_mode`, with a `handler_error` naming the
+item and its mode. Nothing is written. A normal padstack, which KiCad saves
+with no `(padstack ...)` block, exports as before. To route the board, set the
+padstack back to normal in KiCad. Response shapes are unchanged (#842).
+
+## Unreleased: `export_specctra_dsn` turns rotated footprints' pins once (patch release)
+
+A pad's angle in a `.kicad_pcb` already includes its footprint's rotation. The
+Rust exporter wrote that angle as the pin's `(rotate ...)`, and the
+footprint's `(place ...)` rotation turned the pin again, so Freerouting routed
+around every rotated footprint's pads at the wrong orientation. A pin's
+`(rotate ...)` is now the pad's angle within its footprint, normalized to
+[0, 360), kept to six significant digits and omitted when 0, as KiCad's own
+exporter writes it. A footprint at 0° whose pad angles have at most six
+significant digits exports as before.
+
+KiCad's native DSN of a board whose pins carry a `(rotate ...)` could not be
+read, so `native_bridge_mode` `prefer` fell back to the Rust export and
+`require` refused. Both now read it, and treat a native pin rotation that
+differs from the Rust export's like any other mismatch. Arguments, response
+fields and the manifest are unchanged (#840).
+
 ## Unreleased: omitted rectangular symbol pin coordinates are distributed (patch release)
 
 `create_symbol` no longer places every coordinate-less rectangular-unit pin at
@@ -18,6 +176,39 @@ coordinate outward to meet the body; use the returned resolved pin coordinates
 for wiring. Custom `graphics` still require explicit coordinates and glyphs
 that fit retain their established layout. Tool schemas and response shapes are
 unchanged; this does not infer electrical pin roles or redesign a supplied layout.
+
+## Unreleased: `copy_routing_pattern` copies routing from boards KiCad saved (patch release)
+
+`copy_routing_pattern` matched `(segment` and `(via` as two-space-indented
+text, which KiCad 10 never writes, so it copied nothing from a board KiCad had
+saved and reported `copied: 0`. It now reads top-level `segment`, `arc` and
+`via` items from the parsed board (#802).
+
+- **Selection:** an item is copied when every point that places it (a
+  segment's `start`/`end`, an arc's `start`/`mid`/`end`, a via's `at`) is
+  inside the source region, edges included. Vias used to be skipped even on
+  the old layout, because the filter read a `(start …)` they do not have.
+- **Crossing items:** an item with only some points inside is not copied. It
+  is listed in the new `excluded_crossing` array as `{kind, uuid}`.
+- **Copies** keep every attribute (layer, net, width, size, drill, layers,
+  `locked`, …), get a fresh `uuid` (or `tstamp`, on boards from KiCad 7 and
+  earlier), and have each coordinate rounded to the six decimals KiCad writes.
+- **Refusals, with the board untouched:**
+  - KiCad holds the board, or a KiCad lock file sits beside it.
+  - `invalid_argument`: `src_x2 < src_x1` or `src_y2 < src_y1`; a destination
+    equal to the source anchor (field `dest_x`), which would stack every copy
+    on its original; a `net_map` value that is not a string, or names a net
+    no item on the board carries (field `net_map.<name>`); `net_map` on a
+    board that references nets by number, as KiCad 9 boards do (field
+    `net_map`).
+  - A routing item anywhere on the board without readable points or an
+    identity, since whether it is in the region cannot be known.
+  - `conflict`: the board changed after it was read. This is new: the file
+    used to be replaced without that check.
+- **Response:** `copied` is counted in the board text the write verified on
+  disk. New keys are `copied_by_kind` (`segment`, `arc`, `via`), `uuids` (the
+  copies) and `excluded_crossing`. A successful write adds the `warning` the
+  other file-only board edits carry. `dx`/`dy` are rounded the same way.
 
 ## Unreleased: project-file writers refuse while KiCad holds the board (patch release)
 
