@@ -1,7 +1,14 @@
 # KiCad Netclass Defaults
 
 Netclasses live in `.kicad_pro` under `net_settings.classes`. Konnect writes them
-from `create_netclass` (`crates/konnect-core/src/tools/pcb_routing.rs`).
+from `create_netclass` (`crates/konnect-core/src/tools/pcb_routing.rs`): into the
+file when no KiCad holds the board, and into KiCad's loaded project over IPC
+(`SetNetClasses`) when one does. Over IPC only the PCB distances of an
+incomplete Default can be repaired. KiCad 10.0's `NETCLASS::Serialize` sends
+`wire_width` and `bus_width` in schematic internal units under a field named
+`value_nm`, and never sends the microvia sizes or `line_style`. The live path
+therefore reports a missing wire or bus width under `refused_parts` instead of
+writing it, and names the other three as `fields_not_checked`.
 
 This file records what KiCad itself considers a complete netclass, and which
 fields may safely be omitted. The values below are taken from KiCad 10 source and

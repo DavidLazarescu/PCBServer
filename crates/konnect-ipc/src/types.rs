@@ -521,6 +521,60 @@ pub struct IpcRoutingRules {
 /// Net name to its effective (merged) KiCad routing rules.
 pub type IpcEffectiveRoutingRules = BTreeMap<String, IpcRoutingRules>;
 
+/// One explicit net class as `GetNetClasses` reports it, from the project
+/// KiCad has loaded.
+///
+/// A `None` distance means the class does not set that value, so KiCad
+/// resolves it from the Default (and on the Default itself, from nothing).
+/// Distances are nanometres. Microvia sizes and the schematic line style are
+/// absent because KiCad 10.0's `NETCLASS::Serialize` (`common/netclass.cpp`)
+/// never sends them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IpcNetClass {
+    pub name: String,
+    pub priority: Option<i32>,
+    pub clearance_nm: Option<i64>,
+    pub track_width_nm: Option<i64>,
+    pub via_diameter_nm: Option<i64>,
+    pub via_drill_nm: Option<i64>,
+    pub diff_pair_width_nm: Option<i64>,
+    pub diff_pair_gap_nm: Option<i64>,
+    pub diff_pair_via_gap_nm: Option<i64>,
+    /// Whether the class sets a schematic wire width. Only presence is kept:
+    /// KiCad 10.0 fills that `Distance` with schematic internal units rather
+    /// than nanometres (`NETCLASS::Serialize`), so the number is not a length.
+    pub has_wire_width: bool,
+    /// As [`Self::has_wire_width`], for the bus width.
+    pub has_bus_width: bool,
+}
+
+/// The PCB settings `SetNetClasses` writes for one class.
+///
+/// KiCad's `NETCLASS::Deserialize` changes only the distances a message
+/// carries, so `None` leaves a value as it is. The priority is not optional:
+/// that function assigns it unconditionally, and an absent one becomes 0.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IpcNetClassUpdate {
+    pub name: String,
+    pub priority: i32,
+    pub clearance_nm: Option<i64>,
+    pub track_width_nm: Option<i64>,
+    pub via_diameter_nm: Option<i64>,
+    pub via_drill_nm: Option<i64>,
+    pub diff_pair_width_nm: Option<i64>,
+    pub diff_pair_gap_nm: Option<i64>,
+    pub diff_pair_via_gap_nm: Option<i64>,
+}
+
+/// How `SetNetClasses` combines the classes it carries with the project's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IpcNetClassMergeMode {
+    /// Classes the message names are added or updated; the rest stay.
+    Merge,
+    /// Every class the message does not name is removed, except the Default.
+    Replace,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IpcLayer {
     pub name: String,

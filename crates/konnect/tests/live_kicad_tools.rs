@@ -840,3 +840,118 @@ fn board_extents_live_and_saved_agree_on_an_unedited_board() {
         }
     }
 }
+
+/// Net classes while KiCad holds the board: written through KiCad's IPC API,
+/// read back by KiCad, kept out of the project file until the board is saved,
+/// and in it afterwards. Pattern assignment is refused, not written underneath.
+///
+/// Mutates and saves the board's project: use a disposable copy whose sibling
+/// `.kicad_pro` exists, open in KiCad.
+///
+/// ```text
+/// KICAD_API_SOCKET=… KONNECT_LIVE_KICAD_BOARD=… \
+///   cargo test -p konnect --test live_kicad_tools -- --ignored --nocapture \
+///   net_classes_round_trip_through_live_kicad
+/// ```
+#[test]
+#[ignore = "requires a running KiCad GUI, API socket, and a disposable open board with its project"]
+fn net_classes_round_trip_through_live_kicad() {
+    let board = std::path::PathBuf::from(
+        std::env::var("KONNECT_LIVE_KICAD_BOARD")
+            .expect("KONNECT_LIVE_KICAD_BOARD must name the disposable open board"),
+    );
+    let project_file = board.with_extension("kicad_pro");
+    assert!(
+        project_file.exists(),
+        "the board needs its sibling .kicad_pro"
+    );
+    let socket = std::env::var("KICAD_API_SOCKET").expect("KICAD_API_SOCKET is required");
+    let ipc = KiCadIpcClient::new(&socket);
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        match ipc.find_open_board(&board) {
+            Ok(_) => break,
+            Err(error)
+                if error.to_string().contains("AS_NOT_READY")
+                    && std::time::Instant::now() < deadline => {}
+            Err(error) => panic!("KiCad did not open the disposable board: {error:#}"),
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    let class_name = "KonnectLiveProbe";
+    let live_class = |ipc: &KiCadIpcClient| {
+        ipc.get_net_classes()
+            .expect("KiCad answered GetNetClasses")
+            .into_iter()
+            .find(|class| class.name == class_name)
+    };
+    let file_before = std::fs::read(&project_file).unwrap();
+
+    let mut mcp = McpProcess::spawn(&socket);
+    mcp.tool("load_toolset", json!({"name": "pcb_routing"}));
+    let body = |result: Value| -> Value {
+        serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap()
+    };
+
+    let created = body(mcp.tool(
+        "create_netclass",
+        json!({"board": board, "name": class_name, "clearance": 0.31}),
+    ));
+    assert_eq!(created["source"], "ipc", "{created}");
+    assert_eq!(created["persisted"], false, "{created}");
+    let class = live_class(&ipc).expect("KiCad holds the new class");
+    assert_eq!(class.clearance_nm, Some(310_000));
+
+    // An update names one value and keeps the rest.
+    let updated = body(mcp.tool(
+        "create_netclass",
+        json!({"board": board, "name": class_name, "trace_width": 0.27}),
+    ));
+    assert_eq!(updated["changed"], true, "{updated}");
+    let class = live_class(&ipc).expect("KiCad still holds the class");
+    assert_eq!(class.track_width_nm, Some(270_000));
+    assert_eq!(class.clearance_nm, Some(310_000));
+    assert_eq!(class.priority, Some(-1));
+
+    let listed = body(mcp.tool("get_netclasses", json!({"board": board})));
+    assert_eq!(listed["sources"]["definitions"], "ipc", "{listed}");
+    assert!(
+        listed["netclasses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|class| class["name"] == class_name),
+        "{listed}"
+    );
+
+    let refused = mcp.request(
+        "tools/call",
+        json!({"name": "assign_net_to_class",
+               "arguments": {"board": board, "net_name": "GND", "netclass": class_name}}),
+    );
+    assert_eq!(refused["result"]["isError"], true, "{refused}");
+    assert!(
+        refused["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("unsupported_capability"),
+        "{refused}"
+    );
+
+    // Nothing reached the file before the save.
+    assert_eq!(std::fs::read(&project_file).unwrap(), file_before);
+
+    // KiCad writes its project when it saves the board.
+    ipc.save_board().expect("failed to save the live board");
+    let saved: Value =
+        serde_json::from_str(&std::fs::read_to_string(&project_file).unwrap()).unwrap();
+    let saved_class = saved["net_settings"]["classes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|class| class["name"] == class_name)
+        .unwrap_or_else(|| panic!("the saved project lacks {class_name}: {saved}"))
+        .clone();
+    assert_eq!(saved_class["clearance"], json!(0.31), "{saved_class}");
+    assert_eq!(saved_class["track_width"], json!(0.27), "{saved_class}");
+}

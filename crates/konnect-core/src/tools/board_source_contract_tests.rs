@@ -13,7 +13,9 @@
 use crate::mcp::handler::McpHandler;
 use crate::mcp::protocol::CallToolResult;
 use crate::test_support::MockIpcServer;
-use crate::tools::pcb_board::board_mock::{board_document, spawn_kicad_holding_board};
+use crate::tools::pcb_board::board_mock::{
+    board_document_in_project, spawn_kicad_reporting_documents,
+};
 use crate::tools::ServerConfig;
 use konnect_ipc::gen::kiapi;
 use konnect_ipc::gen::kiapi::board::types::BoardLayer;
@@ -40,6 +42,8 @@ const LIVE_COPPER_LAYER_COUNT: u64 = 2;
 const LIVE_LAYERS: [&str; 3] = ["F.Cu", "B.Cu", "Edge.Cuts"];
 const LIVE_TOP_DISPLAY_NAME: &str = "LiveRenamedTop";
 const LIVE_NETS: [&str; 2] = ["LIVE_ONLY_P", "LIVE_ONLY_Q"];
+/// The `Rails` clearance KiCad holds; the project file says 0.5 mm.
+const LIVE_RAILS_CLEARANCE_NM: i64 = 700_000;
 
 /// The layers the double enables, as KiCad's own `BoardLayer` enum rather
 /// than hand-copied numbers — `board_types.proto` is vendored from KiCad and
@@ -250,13 +254,13 @@ fn kind_of(result: &CallToolResult) -> Option<String> {
 /// A KiCad holding `open` open and answering the layer and net queries with
 /// the live half of the divergence.
 fn spawn_live_kicad(open: &Path) -> MockIpcServer {
-    spawn_kicad_holding_board(open, live_answer)
+    spawn_kicad_reporting_documents(vec![board_document_in_project(open)], live_answer)
 }
 
 /// The same KiCad, except it declines the commands `skip` names — an `AS_OK`
 /// with no body, which is how KiCad answers a command it will not serve.
 fn spawn_live_kicad_skipping(open: &Path, skip: &'static str) -> MockIpcServer {
-    spawn_kicad_holding_board(open, move |command| {
+    spawn_kicad_reporting_documents(vec![board_document_in_project(open)], move |command| {
         if command.type_url.ends_with(skip) {
             return None;
         }
@@ -330,7 +334,7 @@ fn no_board_editor_response(request: kiapi::common::ApiRequest) -> kiapi::common
 /// needs a status is its own server: a board KiCad has positively identified
 /// and then declines to answer about.
 fn spawn_kicad_rejecting_after_identification(open: &Path) -> MockIpcServer {
-    let documents = vec![board_document(&open.to_string_lossy())];
+    let documents = vec![board_document_in_project(open)];
     MockIpcServer::spawn("board-source-busy", move |request| {
         let command = request.message.expect("a command");
         if command.type_url.ends_with("GetOpenDocuments") {
@@ -409,6 +413,29 @@ fn live_answer(command: &prost_types::Any) -> Option<prost_types::Any> {
                     .collect(),
             },
             "kiapi.board.commands.NetsResponse",
+        ));
+    }
+    if command.type_url.ends_with("GetNetClasses") {
+        let class =
+            |name: &str, priority: i32, clearance_nm: i64| kiapi::common::project::NetClass {
+                name: name.to_string(),
+                priority: Some(priority),
+                board: Some(kiapi::common::project::NetClassBoardSettings {
+                    clearance: Some(kiapi::common::types::Distance {
+                        value_nm: clearance_nm,
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+        return Some(konnect_ipc::builders::pack_any(
+            &kiapi::common::commands::NetClassesResponse {
+                net_classes: vec![
+                    class("Default", i32::MAX, 200_000),
+                    class("Rails", 1, LIVE_RAILS_CLEARANCE_NM),
+                ],
+            },
+            "kiapi.common.commands.NetClassesResponse",
         ));
     }
     None
@@ -882,11 +909,12 @@ async fn a_board_seen_live_before_the_editor_closed_still_refuses() {
 
 // ─── get_netclasses ──────────────────────────────────────────────────────────
 
-/// The mixed-source answer: definitions and patterns are project-file facts,
-/// the nets are live, and the matches are derived from them. Each is named
-/// separately rather than compressed into one source string.
+/// The mixed-source answer: definitions and nets are live, patterns are a
+/// project-file fact KiCad's API cannot read, and the matches are derived from
+/// them. Each is named separately rather than compressed into one source
+/// string.
 #[tokio::test]
-async fn netclasses_report_live_nets_beside_project_file_definitions() {
+async fn netclasses_report_live_definitions_and_nets_beside_project_file_patterns() {
     let scene = Scene::live().await;
 
     let body = scene.body("get_netclasses", None).await;
@@ -894,7 +922,7 @@ async fn netclasses_report_live_nets_beside_project_file_definitions() {
     assert_eq!(
         body["sources"],
         json!({
-            "definitions": "project_file",
+            "definitions": "ipc",
             "patterns": "project_file",
             "board_nets": "ipc",
             "matched_nets": "derived",
@@ -918,7 +946,9 @@ async fn netclasses_report_live_nets_beside_project_file_definitions() {
         "{body}"
     );
     assert_eq!(rails["matched_nets"], json!([LIVE_NETS[0]]), "{body}");
-    assert_eq!(rails["clearance"], json!(0.5), "{body}");
+    // KiCad's value, not the file's 0.5.
+    assert_eq!(rails["clearance"], json!(0.7), "{body}");
+    assert!(body["patterns_note"].is_string(), "{body}");
     // The pattern the live nets leave idle is the saved-only one.
     assert_eq!(
         body["unmatched_patterns"],

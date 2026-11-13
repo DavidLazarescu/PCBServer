@@ -3,6 +3,39 @@
 Konnect's tool schemas are public API. This file records intentional argument
 removals and the supported replacement workflow.
 
+## Unreleased: net classes go through KiCad while it holds the board (minor release)
+
+`create_netclass` and `get_netclasses` no longer need the board closed. While
+KiCad holds the board, they use KiCad's IPC API (`GetNetClasses`,
+`SetNetClasses`) against KiCad's loaded project, after checking that this
+project is the board's sibling `.kicad_pro` (`wrong_project` otherwise). With
+no KiCad holding the board, they use the project file as before.
+
+- `create_netclass` reads the classes back after the write; a readback that
+  does not hold the request, the class's other values and every other class
+  unchanged is `mutation_outcome_uncertain`. A live write is in KiCad's memory
+  only (`persisted: false`) until the board is saved. New response fields:
+  `source` (`ipc` or `project_file`), `changed`, `persisted`, `priority` (live),
+  `readback` (live), `fallback_reason` (file), and on a live Default
+  `repaired_fields`, `complete`, `refused_parts`, `fields_not_checked`.
+- A KiCad that names the board and then fails the call is refused
+  (`editor_unavailable`); the file is never written instead. Before, any such
+  rejection let the file write through.
+- Distances must be numbers from 0 to 2147 mm; a negative or non-numeric value
+  is `invalid_argument` on both paths. The schema dropped its `default`
+  annotations, which applied to new classes only and are now in the field
+  descriptions.
+- `get_netclasses` reports `sources.definitions: "ipc"` on a live read, with
+  `patterns_note`, and `fields_not_checked` on the Default. Patterns still come
+  from the `.kicad_pro`: KiCad's API has no pattern command.
+- `assign_net_to_class` still needs the board closed, now refusing with
+  `unsupported_capability` and naming the way out. It reports `source` and
+  `fallback_reason` when it writes.
+
+The tools' `board_access` classes changed accordingly: `create_netclass` and
+`get_netclasses` are live-preferred with fallback, `assign_net_to_class` is
+closed-board-only.
+
 ## Unreleased: live board writes keep KiCad 10.0.7+ item data (patch release)
 
 No tool schema changes. The IPC definitions moved from KiCad 10.0.6 to 10.0.8.

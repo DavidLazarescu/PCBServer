@@ -2,9 +2,11 @@
 //!
 //! Saving the board in KiCad rewrites the project file from KiCad's own copy.
 //! So `set_design_rules`, `create_netclass` and `assign_net_to_class` must not
-//! write while KiCad holds the board: the write would be reported and then
-//! reverted. Measured on KiCad 10.0.5 before the fix: all three reported
+//! write the file while KiCad holds the board: the write would be reported and
+//! then reverted. Measured on KiCad 10.0.5 before the fix: all three reported
 //! success, and `run_drc` with `sync_live_board` then put every value back.
+//! `create_netclass` now writes through KiCad instead (`netclass_ipc_tests`);
+//! here it is held to never falling back to the file.
 //!
 //! Driven through served `tools/call`, so dispatch, schema and handler are all
 //! under test. The project is the KiCad-written placement fixture
@@ -12,7 +14,9 @@
 
 use crate::mcp::handler::McpHandler;
 use crate::mcp::protocol::{CallToolResult, ToolContent};
-use crate::tools::pcb_board::board_mock::spawn_kicad_holding_boards;
+use crate::tools::pcb_board::board_mock::{
+    board_document_in_project, spawn_kicad_holding_boards, spawn_kicad_reporting_documents,
+};
 use crate::tools::ServerConfig;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -129,9 +133,33 @@ async fn set_design_rules_refuses_while_kicad_holds_the_board() {
     assert_refused_while_kicad_holds_the_board("set_design_rules").await;
 }
 
+/// KiCad holds the board and its project, and gives no answer to the net
+/// class read. The live write cannot run, and the project file is not the
+/// way around it.
 #[tokio::test]
-async fn create_netclass_refuses_while_kicad_holds_the_board() {
-    assert_refused_while_kicad_holds_the_board("create_netclass").await;
+async fn create_netclass_does_not_fall_back_to_the_file_while_kicad_holds_the_board() {
+    let project = project();
+    let project_before = std::fs::read(&project.project_file).unwrap();
+    let board_before = std::fs::read(&project.board).unwrap();
+    let kicad =
+        spawn_kicad_reporting_documents(vec![board_document_in_project(&project.board)], |_| None);
+    let handler = handler_talking_to(kicad.address()).await;
+
+    let tool = "create_netclass";
+    let result = call(&handler, tool, &project.board, &arguments_for(tool)).await;
+
+    assert!(result.is_error, "{}", text_of(&result));
+    assert_eq!(
+        crate::mcp::error::extract_error_kind(&result).as_deref(),
+        Some("editor_unavailable"),
+        "{}",
+        text_of(&result)
+    );
+    assert_eq!(
+        std::fs::read(&project.project_file).unwrap(),
+        project_before
+    );
+    assert_eq!(std::fs::read(&project.board).unwrap(), board_before);
 }
 
 #[tokio::test]
@@ -158,6 +186,15 @@ async fn each_writer_still_writes_while_kicad_holds_a_different_board() {
 
         let result = call(&handler, tool, &project.board, &arguments_for(tool)).await;
         assert!(!result.is_error, "{tool}: {}", text_of(&result));
+        if tool != "set_design_rules" {
+            let answer: Value = serde_json::from_str(text_of(&result)).unwrap();
+            assert_eq!(answer["source"], json!("project_file"), "{tool}: {answer}");
+            assert_eq!(
+                answer["fallback_reason"]["kind"],
+                json!("board_not_open"),
+                "{tool}: {answer}"
+            );
+        }
 
         let written: Value =
             serde_json::from_str(&std::fs::read_to_string(&project.project_file).unwrap()).unwrap();
