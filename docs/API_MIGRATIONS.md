@@ -3,6 +3,94 @@
 Konnect's tool schemas are public API. This file records intentional argument
 removals and the supported replacement workflow.
 
+## Unreleased: `update_pcb_from_schematic` copies symbol fields onto the footprints it adds (minor release)
+
+The sync carried no symbol field beyond Reference, Value and the footprint.
+`LCSC`, `MPN`, Datasheet, Description and every custom field stayed off the
+board, and DRC's schematic parity reported each one as `Missing symbol field`.
+
+The sync now copies the fields KiCad's Update PCB from Schematic copies, with
+that dialog's defaults: "Update footprint fields from symbols" on, "Remove
+footprint fields not found in symbols" off.
+- **Which fields:** every symbol field but Reference, Value, Footprint and
+  Component Class, an empty one included.
+- **A field the footprint already has** keeps its layer, position, visibility
+  and font, and takes the symbol's text. That includes a field the library gave
+  it, so the symbol's value wins, as in KiCad.
+- **A field the footprint lacks** is added hidden on F.Fab at the footprint's
+  position and rotation. It uses
+  KiCad's default fabrication text: 1.0 mm, with a 0.15 mm stroke. Datasheet and
+  Description, which every KiCad footprint has, are made as KiCad's footprint
+  constructor makes them when the library carried neither.
+- **A footprint field the symbol lacks** is left in place.
+
+This covers the footprints the sync adds. An existing footprint keeps the
+fields it has: a field-only difference plans no update, and an update made for
+another reason carries no fields. The sync updates a footprint by replacing it
+whole, which drops the groups, points and variants it owns, and on a board
+synced before this change most footprints lack their symbol's fields, so
+propagating them would replace nearly every footprint. Carry field changes onto
+existing footprints with KiCad's Update PCB from Schematic.
+
+Each planned addition gains `fields`, a list of `{name, value}`: every field it
+receives. The post-apply readback compares each one's text, layer and
+visibility, as it does the library's fields.
+
+Not covered: the per-variant field values a KiCad 10 netlist can carry, and the
+board's own text settings, which Konnect does not read. The styles above are
+KiCad's defaults. With Board Setup's "Apply board defaults to footprint fields"
+on, which is off by default, KiCad restyles every field of a footprint it adds
+from those settings, and the sync does not (#788).
+
+## Unreleased: `update_pcb_from_schematic` keeps parts excluded from the BOM on the board (minor release)
+
+The sync dropped every symbol marked *Exclude from bill of materials*, so test
+points, wire pads and mounting holes never reached the board, and a part with
+both flags off was dropped without being listed (#875). KiCad's own Update PCB
+removes only a part marked *Exclude from board*; *Exclude from BOM* sets the
+footprint's attribute.
+
+The sync now does the same:
+
+- A symbol with `(in_bom no)` and `(on_board yes)` is added or updated like any
+  other, its footprint's `exclude_from_bill_of_materials` attribute set from the
+  symbol, as `dnp` is. A footprint whose attribute differs from its symbol is
+  planned as an update.
+- Only `(on_board no)` keeps a part off the board, and such a part is always
+  listed under `skipped_by_flag`, whatever its BOM flag.
+- Each `add` and `update` change carries `exclude_from_bom` beside `dnp`.
+
+A board synced before this change gains the footprints the old sync dropped on
+its next sync. No argument was renamed or removed.
+
+## Unreleased: `update_pcb_from_schematic` refuses an update that would drop a footprint's groups, points or variants (patch release)
+
+KiCad's API updates a footprint by replacing it with one built from the
+footprint message sent, and that message carries none of the groups, points or
+variants the footprint owns, so the replacement lacked them. A planned update
+of such a footprint now makes the dry run and the apply a `conflict`, before
+any commit, with one `footprint_children_not_carried` diagnostic per footprint
+naming what it owns. Update those footprints with KiCad's Update PCB from
+Schematic, which edits them in place. No item read lists these, so the sync
+reads the board as KiCad writes it, and only when the plan updates a footprint;
+a footprint missing from that text, or text that does not parse, refuses the
+update the same way. A footprint's membership of a board-level group is not
+affected: KiCad restores it on replacement. An update still drops what a
+footprint owns beyond these three that the message does not carry, such as its
+unit metadata, which KiCad's own Update PCB restores. The response shape is
+unchanged (#836).
+
+## Unreleased: a copper zone blocks pad-net changes only on its own net (patch release)
+
+`update_pcb_from_schematic` refuses to move a pad between nets while copper
+on the old or new net is routed (`routed_pad_net_change`). On a board with any
+zone, it used to count every board net as routed, so no pad on such a board
+could change net. A board-level copper zone now counts as copper on its own net
+only, as KiCad reports it in `Zone.copper_settings.net`, and a rule area counts
+as none. A plan that conflicted only because of a pour on another net is now
+`ready`. A zone whose net KiCad does not report still blocks every net.
+Response shapes are unchanged (#779).
+
 ## Unreleased: net classes go through KiCad while it holds the board (minor release)
 
 `create_netclass` and `get_netclasses` no longer need the board closed. While
@@ -227,6 +315,40 @@ coordinate outward to meet the body; use the returned resolved pin coordinates
 for wiring. Custom `graphics` still require explicit coordinates and glyphs
 that fit retain their established layout. Tool schemas and response shapes are
 unchanged; this does not infer electrical pin roles or redesign a supplied layout.
+
+## Unreleased: `update_pcb_from_schematic` gives footprints their library's fields (patch release)
+
+The previous release carried a footprint's library attributes, description,
+tags and 3D models. Its fields still came from a fixed template:
+- Value went on the silkscreen, hidden, and Reference and Value had no font
+  thickness;
+- the library's Datasheet, Description and custom properties, such as the
+  `KiLib_Generator` on 12,018 stock footprints, were left off.
+
+A footprint the sync adds now has the library's fields:
+- **Reference and Value** with the library's layer, visibility, font,
+  position and keep-upright setting, holding the schematic's text;
+- **Datasheet and Description** where the library has them;
+- **every custom property.**
+
+The post-apply readback also checks each field that was sent: its text, layer,
+visibility and whether it is kept upright. A difference is reported as
+`board_readback_differs`, as other readback differences are.
+
+A footprint whose properties cannot be read is still placed, with the default
+fields as before. The plan then carries a non-blocking `library_fields_not_carried`
+diagnostic naming the footprint, its parts and the reason. 15 of KiCad 10.0.5's
+15,451 stock footprints repeat a property name and are placed this way.
+
+The library property reader is shared with `update_footprints_from_library`.
+Both now read `(unlocked yes)` on a property instead of refusing the footprint:
+3,353 stock footprints carry it. The clause is KiCad's keep-upright setting,
+not a lock: a field without it is kept upright, and one with it is not. Fields
+used to be sent as not kept upright, so KiCad saved `(unlocked yes)` on every
+field either tool wrote; they now keep the library's setting.
+`update_footprints_from_library` still refuses footprints for any other child
+it cannot represent, including a `(locked …)` clause on a property, which no
+stock footprint carries.
 
 ## Unreleased: `copy_routing_pattern` copies routing from boards KiCad saved (patch release)
 

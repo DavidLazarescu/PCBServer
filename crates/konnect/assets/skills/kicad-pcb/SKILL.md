@@ -104,8 +104,12 @@ Follow this sequence for a clean PCB workflow:
    footprint names that footprint and every part that needs it: when the footprint
    cannot be placed (custom-shape pads are not supported), assign those parts a
    footprint without them; when the schematic connects a pad the footprint does not
-   have, fix the symbol or the footprint choice. A successful apply is one KiCad
-   undo entry, so Ctrl-Z reverses the whole update.
+   have, fix the symbol or the footprint choice. An update of a footprint that owns
+   groups, points or variants is a conflict naming what it owns, because KiCad's API
+   would drop them; update those footprints with KiCad's own **Update PCB from
+   Schematic**. Symbol fields such as `LCSC` or `MPN` reach the footprints the
+   sync adds, not existing ones. A successful apply is one KiCad undo entry, so
+   Ctrl-Z reverses the whole update.
 3. **Refresh changed libraries** — when a linked footprint library changed, use
    `update_footprints_from_library`, the MCP equivalent of KiCad **Tools → Update
    Footprints from Library**. This is distinct from `update_pcb_from_schematic`:
