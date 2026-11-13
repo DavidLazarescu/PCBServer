@@ -134,7 +134,7 @@ and Windows servers do not.
 | `batch_add_no_connect` | Add multiple no-connect flags in one write. Marking one MCU's unused pins is routinely 15–20 flags. |
 | `add_junction` | Add a junction dot at a point where wires cross or T-intersect. |
 | `batch_add_junction` | Add multiple junction dots in a single file read/write cycle. |
-| `connect_to_net` | Connect a pin to a named net by adding a short wire stub + net label. Name the pin (reference + pin_number) or give its coordinates; the stub direction defaults to `auto`, pointing away from the symbol body. |
+| `connect_to_net` | Connect a pin to a named net by adding a short wire stub + net label. Name the pin (reference + pin_number) or give its coordinates; the stub direction defaults to `auto`, pointing away from the symbol body. Refuses (`plan_blocked`) when the stub would join another net. |
 | `connect_pins` | Connect two component pins by reference+pin number. Looks up pin coordinates and routes a wire, taking the other L-bend or refusing (`plan_blocked`) when a route would join another net. |
 | `add_schematic_connection` | Connect two schematic points directly with a wire (auto H+V routing, V+H or a `plan_blocked` refusal when a route would join another net). Use `connect_pins` if you have references instead of coordinates. |
 
@@ -177,7 +177,7 @@ and Windows servers do not.
 
 | Tool | Description |
 |------|-------------|
-| `batch_connect_to_net` | Connect many pins to a named net by adding labels at each endpoint, oriented away from the symbol body. `stub_length`, `direction` and `label_type` give `connect_to_net`'s stub and label for every pin in the call. Single read → all edits → single write. |
+| `batch_connect_to_net` | Connect many pins to a named net by adding labels at each endpoint, oriented away from the symbol body. `stub_length`, `direction` and `label_type` give `connect_to_net`'s stub and label for every pin in the call; a pin whose stub would join another net is skipped and listed in `errors`. Single read → all edits → single write. |
 | `batch_delete` | Delete multiple schematic items (wires, labels, junctions, components) by UUID or reference — single file write. |
 | `bulk_move_schematic_components` | Move multiple components by a uniform dx/dy offset in a single atomic write. Junction dots are re-judged, and a no-connect flag travels with the pin it protects. |
 | `batch_edit_schematic_components` | Update fields on multiple schematic components in one atomic write. Set `create_missing: true` to create missing custom fields on every placed unit; built-in fields remain update-only. Per-field `updated_units` and `created_units` report what happened. |

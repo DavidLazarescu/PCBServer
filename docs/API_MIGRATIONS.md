@@ -3,6 +3,25 @@
 Konnect's tool schemas are public API. This file records intentional argument
 removals and the supported replacement workflow.
 
+## Unreleased: `connect_to_net` stubs refuse to join another net (patch release)
+
+With `stub_length` above 0, `connect_to_net` and `batch_connect_to_net` drew
+the stub without checking what it met. A pin the stub passed over got a
+junction, a pin at its end connected by sharing the point, and a wire under
+its end was named by the new label. Each joined that net to the requested one,
+and the call reported success (#899).
+
+The stub is now checked before it is written, like the routed connections. If
+it, or its label, would join a pin, label or sheet pin that is not already on
+the pin's own net or the requested net, `connect_to_net` refuses with
+`plan_blocked`, writes nothing, and names what is in the way in `reasons`.
+`batch_connect_to_net` skips that pin, adds `"<reference>.<pin_number>:
+<reason>"` to `errors`, and still writes the other pins. The same refusal
+applies when a placed symbol's pins cannot be resolved, since the check cannot
+see them. `direction: "auto"` does not try another direction; pass a
+`direction` or `stub_length` that clears the obstacle. Labels placed with
+`stub_length` 0 are unchanged.
+
 ## Unreleased: drawn wires dot only the T's they form (patch release)
 
 `add_wire`, `batch_add_wire`, and the stubs of `connect_to_net` and

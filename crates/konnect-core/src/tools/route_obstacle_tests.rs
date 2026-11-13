@@ -1,4 +1,5 @@
 //! #887: a routed wire joins nothing beyond its two endpoints' nets.
+//! #899: a `connect_to_net` stub joins nothing beyond its pin's net and its own.
 //! #900: a drawn wire or stub dots only the T's it forms.
 //!
 //! The fixture and the expected wires are in
@@ -346,4 +347,143 @@ async fn batch_connect_to_net_stub_leaves_a_dotless_tee_elsewhere_undotted() {
         "{body}"
     );
     assert_eq!(junctions(&path), []);
+}
+
+/// R1.2's stub to the right, ending on R3.1.
+fn stub_onto_r3(net: &str) -> Value {
+    json!({ "reference": "R1", "pin_number": "2", "net": net,
+            "direction": "right", "stub_length": 12.7 })
+}
+
+#[tokio::test]
+async fn connect_to_net_refuses_a_stub_ending_on_another_pin() {
+    let (_dir, path) = fixture();
+    let before = std::fs::read(&path).unwrap();
+    let (is_error, body) = call(&path, "connect_to_net", stub_onto_r3("N")).await;
+    assert!(is_error, "{body}");
+    assert_eq!(body["error"]["kind"], "plan_blocked", "{body}");
+    assert_eq!(body["error"]["operation"], "connect_to_net", "{body}");
+    assert_eq!(
+        reasons(&body),
+        ["the right stub would join R3 pin 1 at (114.3, 105.41)"]
+    );
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "a refusal writes nothing"
+    );
+}
+
+#[tokio::test]
+async fn connect_to_net_refuses_a_stub_passing_over_another_pin() {
+    let (_dir, path) = fixture();
+    let before = std::fs::read(&path).unwrap();
+    let mut args = stub_onto_r3("N");
+    args["stub_length"] = json!(15.24);
+    let (is_error, body) = call(&path, "connect_to_net", args).await;
+    assert!(is_error, "{body}");
+    assert_eq!(
+        reasons(&body),
+        ["the right stub would join R3 pin 1 at (114.3, 105.41)"]
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+/// R54.2's stub ends mid-span on R51's wire: the dot and the label there
+/// would both put R51's net on `N`.
+#[tokio::test]
+async fn connect_to_net_refuses_a_stub_ending_on_another_nets_wire() {
+    let (_dir, path) = fixture();
+    let before = std::fs::read(&path).unwrap();
+    let args = json!({ "reference": "R54", "pin_number": "2", "net": "N",
+                       "direction": "down", "stub_length": 12.7 });
+    let (is_error, body) = call(&path, "connect_to_net", args).await;
+    assert!(is_error, "{body}");
+    assert_eq!(
+        reasons(&body),
+        ["the down stub would join R51 pin 2 at (177.8, 156.21), R52 pin 1 at (203.2, 158.75)"]
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+/// R11.2's stub ends on R13.1, which label `OTHER` already names: joining
+/// `OTHER` is what the call asks for.
+#[tokio::test]
+async fn connect_to_net_joins_a_pin_already_on_the_requested_net() {
+    let (_dir, path) = fixture();
+    let before = sheet_wires(&path);
+    let args = json!({ "reference": "R11", "pin_number": "2", "net": "OTHER",
+                       "direction": "right", "stub_length": 12.7 });
+    let (is_error, body) = call(&path, "connect_to_net", args).await;
+    assert!(!is_error, "{body}");
+    assert_eq!(added_wires(&path, &before), [[101.6, 54.61, 114.3, 54.61]]);
+}
+
+#[tokio::test]
+async fn connect_to_net_refuses_when_pins_cannot_be_resolved() {
+    let (_dir, path) = fixture();
+    let text = std::fs::read_to_string(&path).unwrap();
+    let start = text.find("(lib_symbols").unwrap();
+    let end = konnect_sexp::writer::find_balanced_block(&text, start)
+        .unwrap()
+        .1;
+    std::fs::write(
+        &path,
+        format!("{}(lib_symbols){}", &text[..start], &text[end..]),
+    )
+    .unwrap();
+    let before = std::fs::read(&path).unwrap();
+
+    let args = json!({ "pin_x": 101.6, "pin_y": 148.59, "net": "N", "direction": "up" });
+    let (is_error, body) = call(&path, "connect_to_net", args).await;
+    assert!(is_error, "{body}");
+    assert_eq!(body["error"]["kind"], "plan_blocked", "{body}");
+    assert_eq!(
+        reasons(&body),
+        ["cannot check what the stub would join: one or more placed symbols have unresolved library pin geometry"]
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+#[tokio::test]
+async fn batch_connect_to_net_skips_only_the_blocked_stub() {
+    let (_dir, path) = fixture();
+    let before = sheet_wires(&path);
+    let args = json!({
+        "net_name": "N",
+        "direction": "right",
+        "stub_length": 12.7,
+        "pins": [
+            { "reference": "R1", "pin_number": "2" },
+            { "reference": "R21", "pin_number": "1" }
+        ]
+    });
+    let (is_error, body) = call(&path, "batch_connect_to_net", args).await;
+    assert!(!is_error, "{body}");
+    assert_eq!(body["added_count"], 1, "{body}");
+    assert_eq!(
+        body["errors"],
+        json!(["R1.2: the right stub would join R3 pin 1 at (114.3, 105.41)"])
+    );
+    assert_eq!(
+        added_wires(&path, &before),
+        [[101.6, 148.59, 114.3, 148.59]]
+    );
+    assert_eq!(junctions(&path), []);
+}
+
+#[tokio::test]
+async fn batch_connect_to_net_with_every_stub_blocked_writes_nothing() {
+    let (_dir, path) = fixture();
+    let before = std::fs::read(&path).unwrap();
+    let args = json!({
+        "net_name": "N",
+        "direction": "right",
+        "stub_length": 12.7,
+        "pins": [{ "reference": "R1", "pin_number": "2" }]
+    });
+    let (_, body) = call(&path, "batch_connect_to_net", args).await;
+    assert_eq!(body["added_count"], 0, "{body}");
+    assert_eq!(body["errors"].as_array().unwrap().len(), 1, "{body}");
+    assert_eq!(std::fs::read(&path).unwrap(), before);
 }

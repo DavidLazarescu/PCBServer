@@ -32,7 +32,8 @@ use super::sch_components::{
     plan_component_and_item_deletions, set_property_value, ComponentDeleteTargetError,
 };
 use super::sch_wiring::{
-    add_stub_label, add_stub_wire, resolve_pin_endpoint, resolve_placed_pin, route_between,
+    add_stub_label, add_stub_wire, check_net_stub, resolve_pin_endpoint, resolve_placed_pin,
+    route_between,
 };
 
 // ─── Tool definitions ─────────────────────────────────────────────────────────
@@ -43,7 +44,8 @@ pub fn tools() -> Vec<ToolDef> {
             "batch_connect_to_net",
             "Connect multiple component pins to a named net. By default it adds a net label \
              at each pin endpoint with no wire. Pass stub_length, direction and label_type \
-             for connect_to_net's placement, applied to every pin in the call. \
+             for connect_to_net's placement, applied to every pin in the call; a pin whose \
+             stub or label would join another net is skipped and listed in errors. \
              Single file read → all edits → single file write. \
              Labels are sheet-local: a sheet instanced N times gets N independent nets. \
              Use add_power_symbol or a global_label for a rail shared by every instance, and \
@@ -519,17 +521,33 @@ async fn handle_batch_connect_to_net(
             Some(sch) if stub_length > 0.0 => !has_wire(sch, (px, py), (lx, ly)),
             _ => false,
         };
-        if needs_wire {
-            if let Some(sch) = sch.as_mut() {
+        let draw = |sch: &mut cse::Schematic| {
+            if needs_wire {
                 add_stub_wire(sch, &pin_points, (px, py), (lx, ly));
             }
-        }
-        if needs_label {
-            if let Some(sch) = sch.as_mut() {
+            if needs_label {
                 add_stub_label(sch, label_type, &net_name, (lx, ly), rotation);
-            } else {
+            }
+        };
+        match sch.as_mut() {
+            Some(sch) => {
+                // A stub that would join another net is skipped and reported;
+                // the other pins still land, as an unresolved pin's do.
+                if needs_wire {
+                    if let Err(reasons) = check_net_stub(sch, (px, py), &net_name, dir.name, &draw)?
+                    {
+                        errors.push(format!("{reference}.{pin_number}: {}", reasons.join("; ")));
+                        continue;
+                    }
+                }
+                draw(sch);
+            }
+            None if needs_label => {
                 inserts.push_str(&format_net_label(&net_name, lx, ly, rotation));
             }
+            None => {}
+        }
+        if needs_label {
             labelled.push((lx, ly));
         }
         let duplicate = !needs_wire && !needs_label;

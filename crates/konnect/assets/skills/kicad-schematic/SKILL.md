@@ -157,6 +157,11 @@ connect_to_net(schematic, reference, pin_number, net)
 - Name the pin rather than passing `pin_x`/`pin_y`: the stub then points away
   from the symbol body on its own, instead of the label text running back
   across the pin names. Override with `direction` only to fix a layout clash.
+- A stub that would land on, or pass over, a pin, label or sheet pin of
+  another net is refused with `plan_blocked` and nothing is written
+  (`batch_connect_to_net` skips that pin and lists it in `errors`). `auto`
+  does not look for another way out: pass a `direction` or `stub_length` that
+  clears it.
 - `batch_connect_to_net` does the same for many pins in one read/write. By
   default it places its labels directly on the pin endpoints without stubs;
   pass `stub_length`, `direction` and `label_type` for `connect_to_net`'s

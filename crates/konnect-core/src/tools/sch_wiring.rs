@@ -335,7 +335,9 @@ pub fn tools() -> Vec<ToolDef> {
              Name the pin with reference + pin_number, or give its coordinates directly. \
              The label is sheet-local: a sheet instanced N times gets N independent nets. \
              A rail shared by every instance needs add_power_symbol or a global_label, \
-             which are one net across all sheets and instances.",
+             which are one net across all sheets and instances. Refuses with plan_blocked, \
+             writing nothing, when the stub or its label would join a pin, label or sheet \
+             pin of another net; choose another direction or stub_length then.",
             json!({
                 "type": "object",
                 "properties": {
@@ -593,7 +595,7 @@ pub(crate) fn route_between(
     y2: f64,
 ) -> anyhow::Result<Result<Routed, Vec<String>>> {
     let before = parse_sexp(content)?;
-    let Some(guard) = RouteGuard::new(&before, (x1, y1), (x2, y2)) else {
+    let Some(guard) = RouteGuard::new(&before, (x1, y1), &[(x1, y1), (x2, y2)], None) else {
         return Ok(Err(vec![format!(
             "cannot check what the route would join: {}",
             crate::tools::UNRESOLVED_PIN_GEOMETRY
@@ -639,12 +641,49 @@ pub(crate) fn route_blocked(operation: &str, reasons: Vec<String>) -> CallToolRe
     )
 }
 
-/// What a sheet held before a route from `a` to `b`, built once for every bend
-/// tried. Wire ends are not terminals: a net is joined through what it carries,
-/// and a net of bare wires has nothing to short.
+/// Check a `connect_to_net` stub from `pin` before it is drawn: `draw` applied
+/// to a copy of `sch` must join nothing beyond the pin's own net and `net`
+/// (#899). A stub dots every pin it passes over, connects whatever its end
+/// lands on, and its label names a wire under that end, so each of those would
+/// otherwise join silently. `sch` itself is not changed.
+///
+/// The inner `Err` holds the reason, ready for [`route_blocked`].
+pub(crate) fn check_net_stub(
+    sch: &cse::Schematic,
+    pin: (f64, f64),
+    net: &str,
+    direction: &str,
+    draw: &dyn Fn(&mut cse::Schematic),
+) -> anyhow::Result<Result<(), Vec<String>>> {
+    let source = sch.to_source();
+    let before = parse_sexp(&source)?;
+    let Some(guard) = RouteGuard::new(&before, pin, &[pin], Some(net)) else {
+        return Ok(Err(vec![format!(
+            "cannot check what the stub would join: {}",
+            crate::tools::UNRESOLVED_PIN_GEOMETRY
+        )]));
+    };
+    let mut trial = cse::Schematic::from_source(sch.filepath(), source)?;
+    draw(&mut trial);
+    let joined = guard.foreign_joins(&parse_sexp(&trial.to_source())?);
+    if joined.is_empty() {
+        Ok(Ok(()))
+    } else {
+        Ok(Err(vec![format!(
+            "the {direction} stub would join {}",
+            joined.join(", ")
+        )]))
+    }
+}
+
+/// What a sheet held before a wire from `a` was drawn: a route (built once for
+/// every bend tried) or a `connect_to_net` stub. Wire ends are not terminals: a
+/// net is joined through what it carries, and a net of bare wires has nothing
+/// to short.
 struct RouteGuard {
-    /// The endpoints' nets, and those of any wire an endpoint lies on: a route
-    /// ending mid-span is dotted there, so tapping a wire is the caller's ask.
+    /// The nets the caller asks to join: those at the taps, those of any wire a
+    /// tap lies on (a route ending mid-span is dotted there, so tapping a wire
+    /// is the caller's ask), and the net a stub's label names.
     allowed: Vec<crate::tools::sch_connectivity::NetRoot>,
     a: (f64, f64),
     /// What sits at each point, in sheet order, so one join is reported once.
@@ -660,9 +699,19 @@ struct Terminal {
 }
 
 impl RouteGuard {
+    /// A guard for a wire starting at `a` that may join the nets at `taps`
+    /// (a route's two endpoints, a stub's pin) and the net named `net` (a
+    /// stub's label). A stub's far end is not a tap: whatever it lands on was
+    /// not asked for (#899).
+    ///
     /// `None` when a placed symbol's pins cannot be resolved: the guard would
-    /// not see them, and a route over them would join them unchecked.
-    fn new(before: &konnect_sexp::SexpNode, a: (f64, f64), b: (f64, f64)) -> Option<Self> {
+    /// not see them, and a wire over them would join them unchecked.
+    fn new(
+        before: &konnect_sexp::SexpNode,
+        a: (f64, f64),
+        taps: &[(f64, f64)],
+        net: Option<&str>,
+    ) -> Option<Self> {
         use crate::tools::sch_connectivity::pt_key;
         use konnect_sexp::geometry::point_on_segment;
         use konnect_sexp::schematic::{extract_sheet_pins, LabelKind};
@@ -710,14 +759,17 @@ impl RouteGuard {
             push(at, "a sheet pin".into());
         }
 
-        let mut allowed = vec![graph.root_at(a.0, a.1), graph.root_at(b.0, b.1)];
+        let mut allowed: Vec<_> = taps.iter().map(|p| graph.root_at(p.0, p.1)).collect();
         for w in &wires {
-            if [a, b]
+            if taps
                 .iter()
                 .any(|p| point_on_segment(p.0, p.1, w.x1, w.y1, w.x2, w.y2, 0.01))
             {
                 allowed.push(graph.root_at(w.x1, w.y1));
             }
+        }
+        for label in labels.iter().filter(|l| Some(l.net.as_str()) == net) {
+            allowed.push(graph.root_at(label.x, label.y));
         }
         Some(RouteGuard {
             allowed,
@@ -2740,15 +2792,27 @@ async fn handle_connect_to_net(
     };
     let mut sch = cse::Schematic::load(&sch_path)?;
     let pins = crate::tools::all_pin_endpoints(&tree);
-    let (label_x, label_y, label_rot) = add_net_stub(
-        &mut sch,
-        &pins,
-        (pin_x, pin_y),
-        &dir,
-        stub_length,
-        label_type,
-        &net,
-    );
+    let draw = |sch: &mut cse::Schematic| {
+        add_net_stub(
+            sch,
+            &pins,
+            (pin_x, pin_y),
+            &dir,
+            stub_length,
+            label_type,
+            &net,
+        )
+    };
+    // Only a stub wire can reach past the pin.
+    if stub_length > 0.0 {
+        let stub = |sch: &mut cse::Schematic| {
+            draw(sch);
+        };
+        if let Err(reasons) = check_net_stub(&sch, (pin_x, pin_y), &net, dir.name, &stub)? {
+            return Ok(route_blocked("connect_to_net", reasons));
+        }
+    }
+    let (label_x, label_y, label_rot) = draw(&mut sch);
 
     sch.overwrite()?;
 
