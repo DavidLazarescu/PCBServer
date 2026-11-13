@@ -41,6 +41,8 @@ pub mod placement;
 pub mod project;
 #[cfg(test)]
 mod project_file_writer_tests;
+#[cfg(test)]
+mod route_obstacle_tests;
 pub mod sch_analysis;
 pub(crate) mod sch_annotate;
 pub mod sch_batch;
@@ -1258,6 +1260,41 @@ pub(crate) fn all_pin_endpoints(tree: &konnect_sexp::SexpNode) -> Vec<(f64, f64)
         .into_iter()
         .map(|(p, t)| konnect_sexp::schematic::pin_endpoint(&p, t))
         .collect()
+}
+
+/// What a junction count takes as an exit besides wires, as eeschema's
+/// `JUNCTION_HELPERS::AnalyzePoint` counts them: each symbol's pin tips, with
+/// pins one symbol stacks on a tip counted once, each sheet pin, and each bus
+/// entry's wire end.
+pub(crate) fn junction_exit_points(tree: &konnect_sexp::SexpNode) -> Vec<(f64, f64)> {
+    let mut points = Vec::new();
+    for (_, pins) in placed_pins_by_reference(tree) {
+        points.extend(dedup_points(
+            pins.into_iter()
+                .map(|(pin, t)| konnect_sexp::schematic::pin_endpoint(&pin, t)),
+        ));
+    }
+    points.extend(konnect_sexp::schematic::extract_sheet_pins(tree));
+    points.extend(sch_connectivity::bus_entry_wire_ends(
+        tree,
+        &konnect_sexp::schematic::extract_buses(tree),
+        sch_connectivity::COINCIDENT_TOLERANCE,
+    ));
+    points
+}
+
+/// `points` with each run of coincident points kept once, first one first.
+pub(crate) fn dedup_points(points: impl IntoIterator<Item = (f64, f64)>) -> Vec<(f64, f64)> {
+    let mut unique = Vec::new();
+    for point in points {
+        if !unique
+            .iter()
+            .any(|&(x, y)| konnect_sexp::geometry::points_coincident(x, y, point.0, point.1, 0.01))
+        {
+            unique.push(point);
+        }
+    }
+    unique
 }
 
 /// The direction leading away from the symbol body at `(x, y)`. `None` when

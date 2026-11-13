@@ -3,6 +3,106 @@
 Konnect's tool schemas are public API. This file records intentional argument
 removals and the supported replacement workflow.
 
+## Unreleased: label rotation and bulk moves leave names and values alone (patch release)
+
+`rotate_schematic_label` found a label's `(at …)`, `(justify …)` and
+`(effects` by searching its text, and `bulk_move_schematic_components` found
+each field's `(at …)` the same way. A label name or field value containing one
+of those was matched first: the tool rewrote the name or value, left the
+position or justify where it was, and reported success (#813). Both now edit
+the direct child of the parsed block, as `move_labels_by_offset` does. A global
+label whose own `effects` has no `justify` now gets one there, instead of the
+`Intersheetrefs` field's being replaced. Schemas and responses are unchanged.
+
+## Unreleased: `move_labels_by_offset` moves the label it names, with its fields (patch release)
+
+`move_labels_by_offset` used to edit the first `(at ` in each label's text. For
+a label whose name contains `(at `, that match was inside the name: the tool
+rewrote the name, left the label where it was, and still counted it in
+`moved_labels`. It also moved only the anchor, so a global label's
+`Intersheetrefs` field stayed at its old position.
+
+It now edits the label's own `(at …)` and the `(at …)` of each of its fields,
+as KiCad's own move does, and leaves the name alone. Moved coordinates carry no
+float noise: `114.3 - 2.54` is written as `111.76`. After the write the tool
+reads the file back. If any label of that name is not at its moved anchor, the
+call fails with `mutation_outcome_uncertain`; the file has been written, so
+reload it before retrying. Arguments and the success response are unchanged
+(#803).
+
+## Unreleased: wire tools dot a T built from wire ends (patch release)
+
+`add_wire`, `batch_add_wire`, `connect_to_net`, `batch_connect_to_net`,
+`connect_pins`, `batch_connect_pins` and `add_schematic_connection` used to add a
+junction dot only where a wire end landed mid-span on another wire, or where a
+wire passed over a pin. When three or more wire ends met at one point, they
+wrote no dot. KiCad still connected the ends, but the sheet showed a T that
+looked like a crossing.
+
+Now every point a new wire touches is judged by how many distinct exits meet
+there, counted as eeschema's `JUNCTION_HELPERS::AnalyzePoint` counts them. A
+wire ending there is one exit, and a wire passing through is two. Each symbol
+with a pin tip there is one more, and so are a sheet pin and the wire side of a
+bus entry. Three or more exits get a dot. So two wire ends meeting at a pin
+tip, a sheet pin or a bus entry also get one. A plain corner, or two wires that
+overlap and leave in the same direction, gets none. That includes a collinear
+overlap whose end lands mid-span, which used to get a dot. Pins that one symbol
+stacks on a point, or that two body styles put there, count once.
+Connectivity, schemas and response shapes are unchanged (#897).
+## Unreleased: `connect_to_net` stubs refuse to join another net (patch release)
+
+With `stub_length` above 0, `connect_to_net` and `batch_connect_to_net` drew
+the stub without checking what it met. A pin the stub passed over got a
+junction, a pin at its end connected by sharing the point, and a wire under
+its end was named by the new label. Each joined that net to the requested one,
+and the call reported success (#899).
+
+The stub is now checked before it is written, like the routed connections. If
+it, or its label, would join a pin, label or sheet pin that is not already on
+the pin's own net or the requested net, `connect_to_net` refuses with
+`plan_blocked`, writes nothing, and names what is in the way in `reasons`.
+`batch_connect_to_net` skips that pin, adds `"<reference>.<pin_number>:
+<reason>"` to `errors`, and still writes the other pins. The same refusal
+applies when a placed symbol's pins cannot be resolved, since the check cannot
+see them. `direction: "auto"` does not try another direction; pass a
+`direction` or `stub_length` that clears the obstacle. Labels placed with
+`stub_length` 0 are unchanged.
+
+## Unreleased: drawn wires dot only the T's they form (patch release)
+
+`add_wire`, `batch_add_wire`, and the stubs of `connect_to_net` and
+`batch_connect_to_net` dotted every junction-less T on the sheet, wherever it
+was. KiCad reads such a T as two nets, so drawing any wire joined them, and the
+call still reported success (#900). Each wire now dots only the T's that lie on
+it, as the routed tools already do. A dot-less T elsewhere stays as it is.
+Schemas and response shapes are unchanged.
+
+## Unreleased: routed connections refuse to join another net (patch release)
+
+`connect_pins`, `batch_connect_pins` and `add_schematic_connection` route an
+L-bend, horizontal leg first. A leg that passed over another pin's tip got a
+junction there, and a corner that landed on a sheet pin connected to it. Each
+route also dotted every junction-less T anywhere on the sheet, which KiCad
+reads as two nets. So pins, labels and sheet pins on other nets (or on none)
+silently joined, and the call still reported success (#887).
+
+Each route now dots only the T's it forms itself, and is checked before it is
+written. If the horizontal-first bend would join anything beyond the nets at
+its two endpoints, the vertical-first bend is tried. Ending on a wire mid-span
+still taps that wire's net. If both bends would join another net, or a placed
+symbol's pins cannot be resolved so the check cannot see them,
+`connect_pins` and `add_schematic_connection` refuse with `plan_blocked` and
+write nothing. `reasons` holds one entry per bend tried.
+`batch_connect_pins` skips that pair, adds
+`"<ref1>.<pin1> -> <ref2>.<pin2>: <reasons joined by '; '>"` to `errors`,
+still writes the other pairs, and counts only routed pairs in
+`connected_count`.
+
+Because the corner can now be on either side, `connect_pins` and
+`add_schematic_connection` add `path`: the route's points as `[[x, y], …]`,
+corner included. A route that merely crosses another wire without a junction
+is not a connection and is unchanged.
+
 ## Unreleased: `update_pcb_from_schematic` copies symbol fields onto the footprints it adds (minor release)
 
 The sync carried no symbol field beyond Reference, Value and the footprint.

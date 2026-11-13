@@ -32,7 +32,8 @@ use super::sch_components::{
     plan_component_and_item_deletions, set_property_value, ComponentDeleteTargetError,
 };
 use super::sch_wiring::{
-    add_stub_label, add_stub_wire, resolve_pin_endpoint, resolve_placed_pin, route_between,
+    add_stub_label, add_stub_wire, check_net_stub, resolve_pin_endpoint, resolve_placed_pin,
+    route_between,
 };
 
 // ─── Tool definitions ─────────────────────────────────────────────────────────
@@ -43,7 +44,8 @@ pub fn tools() -> Vec<ToolDef> {
             "batch_connect_to_net",
             "Connect multiple component pins to a named net. By default it adds a net label \
              at each pin endpoint with no wire. Pass stub_length, direction and label_type \
-             for connect_to_net's placement, applied to every pin in the call. \
+             for connect_to_net's placement, applied to every pin in the call; a pin whose \
+             stub or label would join another net is skipped and listed in errors. \
              Single file read → all edits → single file write. \
              Labels are sheet-local: a sheet instanced N times gets N independent nets. \
              Use add_power_symbol or a global_label for a rail shared by every instance, and \
@@ -128,7 +130,8 @@ pub fn tools() -> Vec<ToolDef> {
         tool!(
             "batch_connect_pins",
             "Connect multiple component pin pairs by reference and pin number, in a single \
-             file read/write cycle.",
+             file read/write cycle. Routes as connect_pins does; a pair whose route would \
+             join another net is skipped and listed in errors.",
             json!({
                 "type": "object",
                 "properties": {
@@ -459,9 +462,9 @@ async fn handle_batch_connect_to_net(
     } else {
         Some(cse::Schematic::from_source(&sch_path, content.clone())?)
     };
-    // Only a stub wire can pass over a pin mid-segment.
-    let pin_points = if stub_length > 0.0 {
-        crate::tools::all_pin_endpoints(&tree)
+    // Only a stub wire can pass over a pin mid-segment or meet other exits.
+    let exit_points = if stub_length > 0.0 {
+        crate::tools::junction_exit_points(&tree)
     } else {
         Vec::new()
     };
@@ -518,17 +521,33 @@ async fn handle_batch_connect_to_net(
             Some(sch) if stub_length > 0.0 => !has_wire(sch, (px, py), (lx, ly)),
             _ => false,
         };
-        if needs_wire {
-            if let Some(sch) = sch.as_mut() {
-                add_stub_wire(sch, &pin_points, (px, py), (lx, ly));
+        let draw = |sch: &mut cse::Schematic| {
+            if needs_wire {
+                add_stub_wire(sch, &exit_points, (px, py), (lx, ly));
             }
-        }
-        if needs_label {
-            if let Some(sch) = sch.as_mut() {
+            if needs_label {
                 add_stub_label(sch, label_type, &net_name, (lx, ly), rotation);
-            } else {
+            }
+        };
+        match sch.as_mut() {
+            Some(sch) => {
+                // A stub that would join another net is skipped and reported;
+                // the other pins still land, as an unresolved pin's do.
+                if needs_wire {
+                    if let Err(reasons) = check_net_stub(sch, (px, py), &net_name, dir.name, &draw)?
+                    {
+                        errors.push(format!("{reference}.{pin_number}: {}", reasons.join("; ")));
+                        continue;
+                    }
+                }
+                draw(sch);
+            }
+            None if needs_label => {
                 inserts.push_str(&format_net_label(&net_name, lx, ly, rotation));
             }
+            None => {}
+        }
+        if needs_label {
             labelled.push((lx, ly));
         }
         let duplicate = !needs_wire && !needs_label;
@@ -855,7 +874,7 @@ async fn handle_batch_connect_pins(
     // Resolve every endpoint from the initial tree before any wire is
     // inserted -- symbols/lib_symbols never change as wires are added, so
     // this is safe to do up front instead of re-resolving per connection.
-    let mut resolved: Vec<(f64, f64, f64, f64)> = Vec::new();
+    let mut resolved: Vec<(String, f64, f64, f64, f64)> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
     for conn in &connections {
         let (Some(ref1), Some(pin1), Some(ref2), Some(pin2)) = (
@@ -871,26 +890,38 @@ async fn handle_batch_connect_pins(
             resolve_pin_endpoint(&instances, &lib_syms, ref1, pin1),
             resolve_pin_endpoint(&instances, &lib_syms, ref2, pin2),
         ) {
-            (Ok((x1, y1)), Ok((x2, y2))) => resolved.push((x1, y1, x2, y2)),
+            (Ok((x1, y1)), Ok((x2, y2))) => {
+                resolved.push((format!("{ref1}.{pin1} -> {ref2}.{pin2}"), x1, y1, x2, y2))
+            }
             (Err(e), _) | (_, Err(e)) => errors.push(e.to_string()),
         }
     }
 
-    // ponytail: re-parses content per wire; incremental tree edits if batches get huge.
+    // ponytail: re-parses content and rebuilds net graphs per wire; incremental tree
+    // edits if batches get huge.
+    // A route that would join another net is skipped and reported; the rest
+    // still land, as an unresolved pin's do.
     let mut new_content = content;
-    for (x1, y1, x2, y2) in &resolved {
-        new_content = route_between(new_content, *x1, *y1, *x2, *y2);
+    let mut connected = 0;
+    for (pair, x1, y1, x2, y2) in &resolved {
+        match route_between(&new_content, *x1, *y1, *x2, *y2)? {
+            Ok(routed) => {
+                new_content = routed.content;
+                connected += 1;
+            }
+            Err(reasons) => errors.push(format!("{pair}: {}", reasons.join("; "))),
+        }
     }
 
-    if !resolved.is_empty() {
+    if connected > 0 {
         write_atomic_if_unchanged(&sch_path, &expected, &new_content)?;
     }
 
     let mut result = CallToolResult::json(&json!({
-        "connected_count": resolved.len(),
+        "connected_count": connected,
         "errors": errors
     }));
-    result.is_error = resolved.is_empty() && !errors.is_empty();
+    result.is_error = connected == 0 && !errors.is_empty();
     Ok(result)
 }
 
@@ -946,15 +977,15 @@ fn property_translation_edits(
             continue;
         };
         let prop = &content[prop_start..prop_end];
-        // The property's own (at …), not one nested deeper in (effects …).
-        let Some(at_rel) = prop.find("(at ") else {
+        // The property's own (at …), a direct child: a text search would
+        // match `(at ` inside a quoted name or value first (#813).
+        let Some(&(at_rel, at_close)) =
+            konnect_sexp::writer::direct_children_with_tag(prop, "property", "at").first()
+        else {
             continue;
         };
         let at_abs = prop_start + at_rel + "(at ".len();
-        let Some(close_rel) = prop[at_rel..].find(')') else {
-            continue;
-        };
-        let at_end = prop_start + at_rel + close_rel;
+        let at_end = prop_start + at_close - 1;
         let parts: Vec<&str> = content[at_abs..at_end].split_whitespace().collect();
         let (Some(px), Some(py)) = (
             parts.first().and_then(|s| s.parse::<f64>().ok()),
@@ -2470,6 +2501,8 @@ mod batch_place_and_connect_tests {
 
     /// Six single-pin instances of a synthetic part, positioned so that
     /// connecting them by pin pairs produces a T-junction on the second pair.
+    /// R4's pin lies on the R1-R2 route, so a label `N` on R1 and R4 puts it on
+    /// R1's net already: without it, that route would join R4 (#887).
     fn multi_point_schematic() -> (tempfile::TempDir, std::path::PathBuf) {
         let pin_def = "\t\t\t(pin passive line (at 0 0 0) (length 0)\n\t\t\t\t(name \"~\" (effects (font (size 1.27 1.27))))\n\t\t\t\t(number \"1\" (effects (font (size 1.27 1.27))))\n\t\t\t)\n";
         let lib_sym = format!("\t\t(symbol \"Test:PT\"\n{pin_def}\t\t)\n");
@@ -2478,13 +2511,16 @@ mod batch_place_and_connect_tests {
                 "\t(symbol\n\t\t(lib_id \"Test:PT\")\n\t\t(at {x} {y} 0)\n\t\t(uuid \"{uuid}\")\n\t\t(property \"Reference\" \"{reference}\"\n\t\t\t(at {x} {y} 0)\n\t\t)\n\t)\n"
             )
         };
+        let label = |x: f64, y: f64| format!("\t(label \"N\"\n\t\t(at {x} {y} 0)\n\t)\n");
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("points.kicad_sch");
         std::fs::write(
             &path,
             format!(
-                "(kicad_sch\n\t(version 20250610)\n\t(generator \"konnect\")\n\t(uuid \"3af69a4c-1faa-40bd-91dc-c4fc245c4cbd\")\n\t(lib_symbols\n{}\t)\n{}{}{}{}{}{})\n",
+                "(kicad_sch\n\t(version 20250610)\n\t(generator \"konnect\")\n\t(uuid \"3af69a4c-1faa-40bd-91dc-c4fc245c4cbd\")\n\t(lib_symbols\n{}\t)\n{}{}{}{}{}{}{}{})\n",
                 lib_sym,
+                label(100.0, 100.0),
+                label(110.0, 100.0),
                 inst("R1", 100.0, 100.0, "aaaaaaaa-0000-0000-0000-000000000001"),
                 inst("R2", 120.0, 100.0, "aaaaaaaa-0000-0000-0000-000000000002"),
                 inst("R3", 110.0, 80.0, "aaaaaaaa-0000-0000-0000-000000000003"),
@@ -3972,6 +4008,38 @@ mod bulk_move_field_tests {
         .unwrap();
         assert!(!result.is_error, "{result:?}");
         std::fs::read_to_string(&path).unwrap()
+    }
+
+    /// A Value reading `(at 1 2)` stays as written, and the field moves with
+    /// the part (#813). The sheet is KiCad's own serialization.
+    #[tokio::test]
+    async fn bulk_move_moves_a_field_whose_value_reads_at() {
+        let sheet = include_str!("../../tests/fixtures/label_move_kicad10.kicad_sch").replace(
+            "(property \"Value\" \"10k\"",
+            "(property \"Value\" \"(at 1 2)\"",
+        );
+        assert!(sheet.contains("(property \"Value\" \"(at 1 2)\""));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("move.kicad_sch");
+        std::fs::write(&path, &sheet).unwrap();
+        let result = handle_bulk_move(
+            &json!({ "schematic": path.to_str().unwrap(),
+                     "references": ["R1"], "dx": 2.54, "dy": 0 }),
+            &test_ctx(),
+        )
+        .await
+        .unwrap();
+        assert!(!result.is_error, "{result:?}");
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            after.contains("(property \"Value\" \"(at 1 2)\""),
+            "{after}"
+        );
+        let (symbol, props) = positions(&after);
+        assert_eq!(symbol, [104.14, 101.6, 0.0]);
+        let value = props.iter().find(|(name, _)| name == "Value").unwrap();
+        assert_eq!(value.1, [104.14, 101.6, 90.0]);
     }
 
     /// #120 end to end: a dot the pin vacates is pruned, and the response says
