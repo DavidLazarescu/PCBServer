@@ -525,10 +525,10 @@ fn new_wire_junctions(
 
 /// Add a junction dot at each position that does not already carry one.
 ///
-/// A T the new wire forms can already be dotted (a wire drawn along an
-/// existing one, the second leg of an L meeting the first), and an unguarded
-/// loop would stack a second dot there. `insert_wire_with_junctions` guards
-/// the same way on the string path.
+/// A point the new wire needs dotted can already carry a dot (a branch drawn
+/// onto an existing dotted T, or the same wire drawn twice in a batch), and an
+/// unguarded loop would stack a second dot there. `insert_wire_with_junctions`
+/// guards the same way on the string path.
 fn add_missing_junctions(sch: &mut cse::Schematic, positions: &[(f64, f64)]) {
     for &(x, y) in positions {
         if !sch
