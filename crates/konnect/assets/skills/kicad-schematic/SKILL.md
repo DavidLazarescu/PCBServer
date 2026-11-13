@@ -135,6 +135,12 @@ connect_pins(schematic, ref1, pin1, ref2, pin2)
 - Specify pins by pin number (from get_schematic_pin_locations)
 - Works best when pins are nearby and facing each other
 - Automatically creates wire segments with proper bends
+- The L-bend goes horizontal leg first. When that would land on a pin, label or
+  sheet pin of another net, the vertical-first bend is drawn instead; `path` in
+  the response gives the points actually drawn. When both bends would join
+  another net, the call refuses with `plan_blocked` and writes nothing
+  (`batch_connect_pins` skips that pair and lists it in `errors`). Move a part
+  or use `connect_to_net` for that pair.
 
 ### connect_to_net
 
