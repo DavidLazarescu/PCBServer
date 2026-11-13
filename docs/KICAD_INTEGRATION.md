@@ -59,6 +59,59 @@ refusing any footprint whose 3D model has a non-zero `offset.y`/`rotate.x`/
 `rotate.y`, since reproducing KiCad's own 3D-model flip math for that path
 remains out of scope (issue #604).
 
+### Protocol version
+
+`crates/konnect-ipc/proto/` is KiCad 10.0.8's `api/proto/`, unmodified; its
+`README.md` records the commit. `cargo xtask proto-drift <tag>` compares it with
+another KiCad tag and `--update` replaces it, so a resync starts from one
+command (it needs network access, or `--from` with a KiCad checkout).
+
+The definitions matter beyond new commands. For `UpdateItems` KiCad builds a
+new item from the message and copies it over the existing one, so a field the
+message lacks takes the meaning of its absence: from 10.0.7 an absent via or
+pad `teardrop` turns teardrops off, an absent track `solder_mask` covers
+exposed copper again, and a footprint without `variants` loses its variant
+overrides. prost drops fields its definitions do not declare, so a client with
+older definitions erases them on every read-modify-write. With the 10.0.8
+definitions every field KiCad sends survives decode and re-encode
+(`tests/proto_roundtrip_test.rs`, and the footprint-move case in
+`tests/footprint_transform_test.rs`). Items Konnect builds from scratch leave
+the new fields absent, which gives what 10.0.6 produced: no teardrops, no
+exposed copper, square zone corners.
+
+`run_commit` resolves the bound board before it sends anything and names it in
+the `BeginCommit` and `EndCommit` headers (Since 10.0.7). KiCad 10.0.7 and
+10.0.8 refuse an unscoped `BeginCommit` or `EndCommit` with `AS_BAD_REQUEST`
+whenever more than one editor is open, which includes the schematic editor
+beside the board, and route a scoped one to that board's editor. KiCad 10.0.6
+has no header field and ignores it. Its unscoped commit goes to whichever
+editor answers first, so with the schematic editor open a 10.0.6 transaction
+can be begun on the wrong editor and the board edits are then applied without
+one undo group; no request a client can send avoids that on 10.0.6.
+
+The 10.0.8 definitions offer more than any tool uses yet:
+
+| Capability | Since |
+|---|---|
+| `PadTeardropSettings` on `Pad.teardrop` and `Via.teardrop` | 10.0.7 |
+| `Via.is_free` (via not updated by netlist changes) | 10.0.7 |
+| `Pad.fab_property` (BGA, fiducial, test point, heat sink, castellated, mechanical, press-fit) | 10.0.7 |
+| `SolderMaskOverrides.expose_copper` on tracks, arcs and graphic shapes | 10.0.7 |
+| Zone `corner_smoothing` and `corner_radius` | 10.0.7 |
+| `BoardTextBox.knockout`; text-box border and margins | 10.0.7 |
+| `Group.locked` and design-block `Group.lib_id` | 10.0.7 |
+| `FootprintInstance.embedded_files`; `GetEmbeddedFiles`, `AddEmbeddedFiles`, `SetEmbeddedFiles` for the board | 10.0.7 |
+| `FootprintInstance.variants`; `GetVariants`, `AddVariant`, `DeleteVariant`, `RenameVariant`, `CopyVariant`, `SetVariantDescription`, `GetCurrentVariant`, `SetCurrentVariant` | 10.0.7 |
+| `Table` and `ReferencePoint` board items, `KOT_PCB_POINT` | 10.0.7 |
+| `ExpandTextVariables.expand_env_vars` | 10.0.7 |
+| `FootprintInstance.symbol_units` (symbol unit names and their pins) | 10.0.8 |
+
+The embedded-file and variant commands and `KOT_PCB_POINT` carry no "Since"
+comment; 10.0.7 is the first tag that defines them. `ZoneLayerOverrideEntry` is
+marked unstable by KiCad and exists only so items round-trip. KiCad also
+renamed `TeardropSettings` and `TeardropType` to `ZoneTeardropSettings` and
+`ZoneTeardropType`; the wire format is unchanged.
+
 ### Editor observation
 
 `konnect-ipc::KiCadIpcClient::observe_editor_state` queries the running KiCad
