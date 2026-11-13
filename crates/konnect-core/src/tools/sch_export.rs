@@ -193,6 +193,9 @@ pub fn tools() -> Vec<ToolDef> {
              run a conflict whose diagnostics name the footprint and every part that needs it. \
              So does an update of a footprint that owns groups, points or variants, which \
              KiCad's API would drop. \
+             A symbol marked Exclude from board is skipped and listed; one excluded only \
+             from the BOM is placed, its footprint marked. Added footprints carry their \
+             library's fields and their symbol's fields; existing footprints keep theirs. \
              Added footprints are staged beside the board as KiCad measured it; `staging` \
              names the item classes KiCad would not list, so a partial or unmeasured board \
              is never reported as complete or empty.",
