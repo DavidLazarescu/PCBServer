@@ -2183,25 +2183,26 @@ async fn handle_rotate_label(
         }));
     };
 
-    let (block_start, block_end) = find_balanced_block(&content, label.start)
-        .ok_or_else(|| anyhow::anyhow!("Cannot parse label block"))?;
-    let block = &content[block_start..block_end];
+    // Every part is a direct child of the parsed block, never a text match: a
+    // label name reading `(at …)`, `(justify …)` or `(effects` would otherwise
+    // be rewritten in place of the real one (#813).
+    let block_start = label.start;
+    let block = &content[block_start..label.end];
+    let child = |tag: &str| {
+        direct_children_with_tag(block, label.kind, tag)
+            .into_iter()
+            .next()
+    };
 
     let mut edits = Vec::new();
 
     // 1. The (at X Y ROT) anchor.
-    let at_rel = block
-        .find("(at ")
-        .ok_or_else(|| anyhow::anyhow!("No (at) in label block"))?;
-    let at_val = block_start + at_rel + "(at ".len();
-    let at_close = content[at_val..]
-        .find(')')
-        .map(|o| at_val + o)
-        .ok_or_else(|| anyhow::anyhow!("Malformed (at)"))?;
+    let (at_start, at_end) =
+        child("at").ok_or_else(|| anyhow::anyhow!("No (at) in label block"))?;
     edits.push(SexpEdit::replace(
-        at_val,
-        at_close,
-        format!("{x} {y} {rotation}"),
+        block_start + at_start,
+        block_start + at_end,
+        format!("(at {x} {y} {rotation})"),
     ));
 
     // 2. The justify, which is what actually turns the text — rotating the
@@ -2215,27 +2216,26 @@ async fn handle_rotate_label(
         format!("(justify {justify})")
     };
 
-    if let Some(j_rel) = block.find("(justify ") {
-        // Replace the existing justify in place.
-        let j_start = block_start + j_rel;
-        let j_end = find_balanced_block(&content, j_start)
-            .map(|(_, e)| e)
-            .ok_or_else(|| anyhow::anyhow!("Malformed (justify)"))?;
-        edits.push(SexpEdit::replace(j_start, j_end, justify_sexp));
-    } else if let Some(e_rel) = block.find("(effects") {
-        // An effects block with no justify — add one just inside it.
-        let e_start = block_start + e_rel;
-        let (_, e_end) = find_balanced_block(&content, e_start)
-            .ok_or_else(|| anyhow::anyhow!("Malformed (effects)"))?;
-        edits.push(SexpEdit::insert(e_end - 1, format!(" {justify_sexp}")));
+    if let Some((e_start, e_end)) = child("effects") {
+        let effects = &block[e_start..e_end];
+        match direct_children_with_tag(effects, "effects", "justify").first() {
+            // Replace the existing justify in place.
+            Some(&(j_start, j_end)) => edits.push(SexpEdit::replace(
+                block_start + e_start + j_start,
+                block_start + e_start + j_end,
+                justify_sexp,
+            )),
+            // An effects block with no justify — add one just inside it.
+            None => edits.push(SexpEdit::insert(
+                block_start + e_end - 1,
+                format!(" {justify_sexp}"),
+            )),
+        }
     } else {
         // No effects at all — the shape add_schematic_net_label used to write.
         // Insert a complete block where eeschema puts it: before the uuid,
         // matching that line's indentation.
-        let insert_at = block
-            .find("(uuid")
-            .map(|r| block_start + r)
-            .unwrap_or(block_end - 1);
+        let insert_at = block_start + child("uuid").map_or(block.len() - 1, |(start, _)| start);
         let line_start = content[..insert_at]
             .rfind('\n')
             .map(|p| p + 1)
@@ -4220,6 +4220,51 @@ mod label_tests {
         assert_ne!(renamed, LABEL_MOVE);
         assert!(!labels_landed(&renamed, "(at 1 2)", &target));
         assert!(!labels_landed(LABEL_MOVE, "(at 1 2)", &target));
+    }
+
+    async fn rotate_label(path: &std::path::Path, net: &str, x: f64, y: f64) -> String {
+        let result = handle_rotate_label(
+            &json!({ "schematic": path.display().to_string(),
+                     "net": net, "x": x, "y": y, "rotation": 180 }),
+            &test_ctx(),
+        )
+        .await
+        .unwrap();
+        assert!(!result.is_error, "{:?}", result.content);
+        std::fs::read_to_string(path).unwrap()
+    }
+
+    /// The label named `(at 1 2)` turns, and keeps its name: only its own
+    /// anchor and justify change (#813).
+    #[tokio::test]
+    async fn rotate_schematic_label_turns_a_label_whose_name_reads_at() {
+        let (_d, path) = label_move_sheet();
+
+        let after = rotate_label(&path, "(at 1 2)", 114.3, 97.79).await;
+        let expected = LABEL_MOVE.replace(
+            "(label \"(at 1 2)\"\n\t\t(at 114.3 97.79 0)\n\t\t(effects\n\t\t\t(font\n\t\t\t\t(size 1.27 1.27)\n\t\t\t)\n\t\t\t(justify left bottom)",
+            "(label \"(at 1 2)\"\n\t\t(at 114.3 97.79 180)\n\t\t(effects\n\t\t\t(font\n\t\t\t\t(size 1.27 1.27)\n\t\t\t)\n\t\t\t(justify right bottom)",
+        );
+        assert_ne!(expected, LABEL_MOVE);
+        assert_eq!(after, expected);
+    }
+
+    /// A name reading `(justify …)` and `(effects` is left alone too, and
+    /// the label's own justify is the one replaced (#813).
+    #[tokio::test]
+    async fn rotate_schematic_label_keeps_a_name_reading_justify_and_effects() {
+        let (_d, path) = label_move_sheet();
+        let name = "(justify left) (effects";
+        let sheet = LABEL_MOVE.replace("(label \"(at 1 2)\"", &format!("(label \"{name}\""));
+        std::fs::write(&path, &sheet).unwrap();
+
+        let after = rotate_label(&path, name, 114.3, 97.79).await;
+        let expected = sheet.replace(
+            "\t\t(at 114.3 97.79 0)\n\t\t(effects\n\t\t\t(font\n\t\t\t\t(size 1.27 1.27)\n\t\t\t)\n\t\t\t(justify left bottom)",
+            "\t\t(at 114.3 97.79 180)\n\t\t(effects\n\t\t\t(font\n\t\t\t\t(size 1.27 1.27)\n\t\t\t)\n\t\t\t(justify right bottom)",
+        );
+        assert_ne!(expected, sheet);
+        assert_eq!(after, expected);
     }
 }
 

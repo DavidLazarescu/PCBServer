@@ -3,6 +3,17 @@
 Konnect's tool schemas are public API. This file records intentional argument
 removals and the supported replacement workflow.
 
+## Unreleased: label rotation and bulk moves leave names and values alone (patch release)
+
+`rotate_schematic_label` found a label's `(at …)`, `(justify …)` and
+`(effects` by searching its text, and `bulk_move_schematic_components` found
+each field's `(at …)` the same way. A label name or field value containing one
+of those was matched first: the tool rewrote the name or value, left the
+position or justify where it was, and reported success (#813). Both now edit
+the direct child of the parsed block, as `move_labels_by_offset` does. A global
+label whose own `effects` has no `justify` now gets one there, instead of the
+`Intersheetrefs` field's being replaced. Schemas and responses are unchanged.
+
 ## Unreleased: `move_labels_by_offset` moves the label it names, with its fields (patch release)
 
 `move_labels_by_offset` used to edit the first `(at ` in each label's text. For

@@ -977,15 +977,15 @@ fn property_translation_edits(
             continue;
         };
         let prop = &content[prop_start..prop_end];
-        // The property's own (at …), not one nested deeper in (effects …).
-        let Some(at_rel) = prop.find("(at ") else {
+        // The property's own (at …), a direct child: a text search would
+        // match `(at ` inside a quoted name or value first (#813).
+        let Some(&(at_rel, at_close)) =
+            konnect_sexp::writer::direct_children_with_tag(prop, "property", "at").first()
+        else {
             continue;
         };
         let at_abs = prop_start + at_rel + "(at ".len();
-        let Some(close_rel) = prop[at_rel..].find(')') else {
-            continue;
-        };
-        let at_end = prop_start + at_rel + close_rel;
+        let at_end = prop_start + at_close - 1;
         let parts: Vec<&str> = content[at_abs..at_end].split_whitespace().collect();
         let (Some(px), Some(py)) = (
             parts.first().and_then(|s| s.parse::<f64>().ok()),
@@ -4008,6 +4008,38 @@ mod bulk_move_field_tests {
         .unwrap();
         assert!(!result.is_error, "{result:?}");
         std::fs::read_to_string(&path).unwrap()
+    }
+
+    /// A Value reading `(at 1 2)` stays as written, and the field moves with
+    /// the part (#813). The sheet is KiCad's own serialization.
+    #[tokio::test]
+    async fn bulk_move_moves_a_field_whose_value_reads_at() {
+        let sheet = include_str!("../../tests/fixtures/label_move_kicad10.kicad_sch").replace(
+            "(property \"Value\" \"10k\"",
+            "(property \"Value\" \"(at 1 2)\"",
+        );
+        assert!(sheet.contains("(property \"Value\" \"(at 1 2)\""));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("move.kicad_sch");
+        std::fs::write(&path, &sheet).unwrap();
+        let result = handle_bulk_move(
+            &json!({ "schematic": path.to_str().unwrap(),
+                     "references": ["R1"], "dx": 2.54, "dy": 0 }),
+            &test_ctx(),
+        )
+        .await
+        .unwrap();
+        assert!(!result.is_error, "{result:?}");
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            after.contains("(property \"Value\" \"(at 1 2)\""),
+            "{after}"
+        );
+        let (symbol, props) = positions(&after);
+        assert_eq!(symbol, [104.14, 101.6, 0.0]);
+        let value = props.iter().find(|(name, _)| name == "Value").unwrap();
+        assert_eq!(value.1, [104.14, 101.6, 90.0]);
     }
 
     /// #120 end to end: a dot the pin vacates is pruned, and the response says
