@@ -3,6 +3,15 @@
 Konnect's tool schemas are public API. This file records intentional argument
 removals and the supported replacement workflow.
 
+## Unreleased: drawn wires dot only the T's they form (patch release)
+
+`add_wire`, `batch_add_wire`, and the stubs of `connect_to_net` and
+`batch_connect_to_net` dotted every junction-less T on the sheet, wherever it
+was. KiCad reads such a T as two nets, so drawing any wire joined them, and the
+call still reported success (#900). Each wire now dots only the T's that lie on
+it, as the routed tools already do. A dot-less T elsewhere stays as it is.
+Schemas and response shapes are unchanged.
+
 ## Unreleased: routed connections refuse to join another net (patch release)
 
 `connect_pins`, `batch_connect_pins` and `add_schematic_connection` route an

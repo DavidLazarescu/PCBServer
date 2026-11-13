@@ -1,4 +1,5 @@
 //! #887: a routed wire joins nothing beyond its two endpoints' nets.
+//! #900: a drawn wire or stub dots only the T's it forms.
 //!
 //! The fixture and the expected wires are in
 //! `tests/fixtures/route_obstacles_kicad10.README.md`, with KiCad's netlist of
@@ -27,6 +28,11 @@ const CLEAR_PATH: [(f64, f64); 3] = [(101.6, 156.21), (127.0, 156.21), (127.0, 1
 const SHEET_PATH: [(f64, f64); 3] = [(177.8, 105.41), (177.8, 107.95), (203.2, 107.95)];
 /// Where R53's wire ends mid-span on R51's, with no junction: two nets to KiCad.
 const DOTLESS_TEE: (f64, f64) = (190.5, 156.21);
+/// A wire far from every part of the fixture.
+const FAR_WIRE: [f64; 4] = [20.32, 20.32, 30.48, 20.32];
+/// A wire ending mid-span on R51's wire, away from R53's: a T of its own.
+const OWN_TEE_WIRE: [f64; 4] = [196.85, 149.86, 196.85, 156.21];
+const OWN_TEE: (f64, f64) = (196.85, 156.21);
 
 fn fixture() -> (tempfile::TempDir, PathBuf) {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
@@ -273,4 +279,71 @@ async fn batch_connect_pins_with_every_route_blocked_is_an_error_and_writes_noth
     assert!(is_error, "{body}");
     assert_eq!(body["connected_count"], 0, "{body}");
     assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+fn wire_args([x1, y1, x2, y2]: [f64; 4]) -> Value {
+    json!({ "x1": x1, "y1": y1, "x2": x2, "y2": y2 })
+}
+
+#[tokio::test]
+async fn add_wire_dots_only_the_tee_it_forms() {
+    let (_dir, path) = fixture();
+    let before = sheet_wires(&path);
+    for wire in [FAR_WIRE, OWN_TEE_WIRE] {
+        let (is_error, body) = call(&path, "add_wire", wire_args(wire)).await;
+        assert!(!is_error, "{body}");
+    }
+    let mut expected = vec![FAR_WIRE, OWN_TEE_WIRE];
+    expected.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    assert_eq!(added_wires(&path, &before), expected);
+    assert_eq!(
+        junctions(&path),
+        [OWN_TEE],
+        "R53.2 stays off R51's net, and the new T is dotted"
+    );
+}
+
+#[tokio::test]
+async fn batch_add_wire_dots_only_the_tee_it_forms() {
+    let (_dir, path) = fixture();
+    let wires = json!([wire_args(FAR_WIRE), wire_args(OWN_TEE_WIRE)]);
+    let (is_error, body) = call(&path, "batch_add_wire", json!({ "wires": wires })).await;
+    assert!(!is_error, "{body}");
+    assert_eq!(body["added_wires"], 2, "{body}");
+    assert_eq!(junctions(&path), [OWN_TEE]);
+}
+
+/// R21.1's stub runs up into empty sheet.
+#[tokio::test]
+async fn connect_to_net_stub_leaves_a_dotless_tee_elsewhere_undotted() {
+    let (_dir, path) = fixture();
+    let before = sheet_wires(&path);
+    let args = json!({ "reference": "R21", "pin_number": "1", "net": "STUB" });
+    let (is_error, body) = call(&path, "connect_to_net", args).await;
+    assert!(!is_error, "{body}");
+    assert_eq!(
+        added_wires(&path, &before),
+        [[101.6, 148.59, 101.6, 146.05]],
+        "{body}"
+    );
+    assert_eq!(junctions(&path), []);
+}
+
+#[tokio::test]
+async fn batch_connect_to_net_stub_leaves_a_dotless_tee_elsewhere_undotted() {
+    let (_dir, path) = fixture();
+    let before = sheet_wires(&path);
+    let args = json!({
+        "net_name": "STUB",
+        "stub_length": 2.54,
+        "pins": [{ "reference": "R21", "pin_number": "1" }]
+    });
+    let (is_error, body) = call(&path, "batch_connect_to_net", args).await;
+    assert!(!is_error, "{body}");
+    assert_eq!(
+        added_wires(&path, &before),
+        [[101.6, 148.59, 101.6, 146.05]],
+        "{body}"
+    );
+    assert_eq!(junctions(&path), []);
 }

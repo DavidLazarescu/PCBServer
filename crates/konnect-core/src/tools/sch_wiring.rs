@@ -31,7 +31,8 @@ pub fn tools() -> Vec<ToolDef> {
         tool!(
             "add_wire",
             "Add a wire segment between two points. The wire must be horizontal or vertical. \
-             T-junctions are automatically detected and junction dots inserted.",
+             T-junctions the new wire forms are detected and get junction dots; a dot-less T \
+             elsewhere on the sheet is left as it is.",
             json!({
                 "type": "object",
                 "properties": {
@@ -478,12 +479,29 @@ fn pins_mid_segment(pins: &[(f64, f64)], x1: f64, y1: f64, x2: f64, y2: f64) -> 
         .collect()
 }
 
+/// The T's that the new wire `(x1, y1)→(x2, y2)` forms with `wires`, which
+/// must already hold it.
+///
+/// [`find_t_junctions`] reports every T on the sheet. A dot-less T elsewhere
+/// is two nets to KiCad, and dotting it would join them unasked (#887, #900),
+/// so only the T's lying on the new wire are kept.
+fn t_junctions_on_new_wire(
+    wires: &[Wire],
+    (x1, y1): (f64, f64),
+    (x2, y2): (f64, f64),
+) -> Vec<(f64, f64)> {
+    find_t_junctions(wires, 0.01)
+        .into_iter()
+        .filter(|&(jx, jy)| konnect_sexp::geometry::point_on_segment(jx, jy, x1, y1, x2, y2, 0.01))
+        .collect()
+}
+
 /// Add a junction dot at each position that does not already carry one.
 ///
-/// `find_t_junctions` reports every T on the sheet, not only the ones the new
-/// wire made, so an unguarded loop re-emits a dot at every existing T on every
-/// call — quadratic in a batch. `insert_wire_with_junctions` guards the same
-/// way on the string path.
+/// A T the new wire forms can already be dotted (a wire drawn along an
+/// existing one, the second leg of an L meeting the first), and an unguarded
+/// loop would stack a second dot there. `insert_wire_with_junctions` guards
+/// the same way on the string path.
 fn add_missing_junctions(sch: &mut cse::Schematic, positions: &[(f64, f64)]) {
     for &(x, y) in positions {
         if !sch
@@ -524,12 +542,7 @@ pub(crate) fn insert_wire_with_junctions(
     };
     existing_wires.push(new_wire);
 
-    // Only the T's this wire forms. A dot-less T elsewhere on the sheet is two
-    // nets to KiCad, and dotting it would join them unasked (#887).
-    let mut junctions: Vec<(f64, f64)> = find_t_junctions(&existing_wires, 0.01)
-        .into_iter()
-        .filter(|&(jx, jy)| konnect_sexp::geometry::point_on_segment(jx, jy, x1, y1, x2, y2, 0.01))
-        .collect();
+    let mut junctions = t_junctions_on_new_wire(&existing_wires, (x1, y1), (x2, y2));
     // Existing pins the new wire passes over also need junction dots.
     let pins = tree
         .as_ref()
@@ -774,7 +787,7 @@ async fn handle_add_wire(
         y2,
         uuid: None,
     });
-    let junctions = find_t_junctions(&existing_wires, 0.01);
+    let junctions = t_junctions_on_new_wire(&existing_wires, (x1, y1), (x2, y2));
 
     sch.add_wire(x1, y1, x2, y2);
     add_missing_junctions(&mut sch, &junctions);
@@ -840,7 +853,7 @@ async fn handle_batch_add_wire(
             y2,
             uuid: None,
         });
-        let junctions = find_t_junctions(&existing_wires, 0.01);
+        let junctions = t_junctions_on_new_wire(&existing_wires, (x1, y1), (x2, y2));
 
         sch.add_wire(x1, y1, x2, y2);
         add_missing_junctions(&mut sch, &junctions);
@@ -2782,7 +2795,7 @@ pub(crate) fn add_stub_wire(
         y2,
         uuid: None,
     });
-    let junctions = find_t_junctions(&existing_wires, 0.01);
+    let junctions = t_junctions_on_new_wire(&existing_wires, (x1, y1), (x2, y2));
 
     sch.add_wire(x1, y1, x2, y2);
     add_missing_junctions(sch, &junctions);
