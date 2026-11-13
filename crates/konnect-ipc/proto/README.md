@@ -31,16 +31,13 @@ Replace the whole tree from one tag, never single files, so the snapshot stays
 coherent (`board_types.proto` imports `embedded_files.proto`, for example):
 
 ```bash
-TAG=10.0.8
-cd crates/konnect-ipc/proto
-for path in $(curl -s "https://gitlab.com/api/v4/projects/kicad%2Fcode%2Fkicad/repository/tree?path=api/proto&ref=$TAG&recursive=true&per_page=100" \
-    | python3 -c 'import json,sys; [print(e["path"]) for e in json.load(sys.stdin) if e["type"]=="blob"]'); do
-  rel=${path#api/proto/}; mkdir -p "$(dirname "$rel")"
-  curl -sf "https://gitlab.com/kicad/code/kicad/-/raw/$TAG/$path" -o "$rel"
-done
-git ls-remote https://gitlab.com/kicad/code/kicad.git "refs/tags/$TAG^{}"   # commit for the table above
+cargo xtask proto-drift 10.0.9            # report: changed, new and removed files, new "Since:" tags
+cargo xtask proto-drift 10.0.9 --update   # replace the tree with that tag
+cargo xtask proto-drift 10.0.9 --from ~/src/kicad   # compare with a local checkout instead
 ```
 
-Then add any new file to `build.rs`, update the table above, and decide for
-every new or changed field whether `builders.rs`, `client.rs` and `types.rs`
-need to change (see `docs/KICAD_INTEGRATION.md`, "Protocol version").
+It reads `api/proto` from KiCad's GitLab with `curl`, prints the tag's commit
+(from `git ls-remote`), and exits 1 when the trees differ. After `--update`,
+add any new file to `build.rs`, update the table above, and decide for every
+new or changed field whether `builders.rs`, `client.rs` and `types.rs` need to
+change (see `docs/KICAD_INTEGRATION.md`, "Protocol version").

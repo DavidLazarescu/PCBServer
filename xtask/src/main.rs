@@ -10,6 +10,11 @@
 //! moves the counts conflicts with the whole open queue at once. v0.10.0 did
 //! exactly that to eleven open pull requests. The guard stays; the
 //! hand-editing does not.
+//!
+//! `cargo xtask proto-drift <kicad-tag>` compares the vendored KiCad IPC
+//! definitions with a KiCad tag; see `proto_drift.rs`.
+
+mod proto_drift;
 
 use konnect_core::router::{meta_tools, registry};
 use std::path::{Path, PathBuf};
@@ -20,9 +25,14 @@ const NL: char = '\n';
 fn main() {
     match std::env::args().nth(1).as_deref() {
         Some("fix-doc-counts") => fix_doc_counts(),
+        Some("proto-drift") => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            std::process::exit(proto_drift::run(&repo_root(), &args));
+        }
         other => {
             eprintln!("unknown task: {other:?}");
             eprintln!("usage: cargo xtask fix-doc-counts");
+            eprintln!("       {}", proto_drift::USAGE);
             std::process::exit(2);
         }
     }
