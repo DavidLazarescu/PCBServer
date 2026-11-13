@@ -211,6 +211,8 @@ pub fn build_track(
         layer: layer_from_name(layer) as i32,
         net: Some(net(net_name, net_code)),
         parent: None,
+        // Absent: covered by mask, margin from the board rules (KiCad 10.0.7+).
+        solder_mask: None,
     }
 }
 
@@ -238,6 +240,7 @@ pub fn build_track_arc(
         layer: layer_from_name(layer) as i32,
         net: Some(net(net_name, net_code)),
         parent: None,
+        solder_mask: None,
     }
 }
 
@@ -300,6 +303,12 @@ pub fn build_via(
         net: Some(net(net_name, net_code)),
         r#type: ViaType::VtThrough as i32,
         parent: None,
+        // Absent teardrop settings: KiCad 10.0.7+ creates the via with
+        // teardrops disabled, which is also its constructor default and so
+        // what 10.0.6 (no such field) produced.
+        teardrop: None,
+        zone_layer_overrides: vec![],
+        is_free: false,
     }
 }
 
@@ -343,9 +352,9 @@ pub struct ZoneSpec<'a> {
 /// hand KiCad a fill that ignores every clearance it knows about.
 pub fn build_zone(spec: &ZoneSpec<'_>, net_code: i32) -> kiapi::board::types::Zone {
     use kiapi::board::types::{
-        CopperZoneSettings, IslandRemovalMode, TeardropSettings, TeardropType,
-        ThermalSpokeSettings, ZoneBorderSettings, ZoneBorderStyle, ZoneConnectionSettings,
-        ZoneFillMode, ZoneType,
+        CopperZoneSettings, IslandRemovalMode, ThermalSpokeSettings, ZoneBorderSettings,
+        ZoneBorderStyle, ZoneConnectionSettings, ZoneCornerSmoothingMode, ZoneFillMode,
+        ZoneTeardropSettings, ZoneTeardropType, ZoneType,
     };
 
     let outline = kiapi::common::types::PolySet {
@@ -385,9 +394,13 @@ pub fn build_zone(spec: &ZoneSpec<'_>, net_code: i32) -> kiapi::board::types::Zo
         // Only read when fill_mode is ZFM_HATCHED.
         hatch_settings: None,
         net: Some(net(spec.net_name, net_code)),
-        teardrop: Some(TeardropSettings {
-            r#type: TeardropType::TdtNone as i32,
+        teardrop: Some(ZoneTeardropSettings {
+            r#type: ZoneTeardropType::ZtdtNone as i32,
         }),
+        // A freshly drawn pcbnew zone has square corners. KiCad 10.0.6 ignores
+        // both fields.
+        corner_smoothing: ZoneCornerSmoothingMode::ZcsmNone as i32,
+        corner_radius: None,
     };
 
     kiapi::board::types::Zone {
@@ -493,6 +506,7 @@ fn board_shape(
         id: None, // KiCAD assigns
         locked: kiapi::common::types::LockedState::LsUnlocked as i32,
         parent: None,
+        solder_mask: None,
     }
 }
 

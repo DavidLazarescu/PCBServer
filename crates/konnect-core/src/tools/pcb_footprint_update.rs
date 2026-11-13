@@ -2481,6 +2481,9 @@ mod tests {
             symbol_sheet_filename: "keyboard.kicad_sch".to_string(),
             symbol_footprint_filters: "Test:*".to_string(),
             parent: None,
+            embedded_files: None,
+            variants: vec![],
+            symbol_units: vec![],
         }
     }
 

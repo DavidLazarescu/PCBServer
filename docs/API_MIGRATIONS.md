@@ -3,6 +3,24 @@
 Konnect's tool schemas are public API. This file records intentional argument
 removals and the supported replacement workflow.
 
+## Unreleased: live board writes keep KiCad 10.0.7+ item data (patch release)
+
+No tool schema changes. The IPC definitions moved from KiCad 10.0.6 to 10.0.8.
+A live board edit that reads footprints and writes them back (moving and
+rotating footprints, placement batches, schematic sync, footprint graphics
+repair) now keeps what KiCad 10.0.7 and later attach to them: footprint
+variants, embedded files and symbol units, pad teardrop settings, zone layer
+overrides and fabrication properties, exposed copper on graphic shapes,
+corner smoothing on footprint zones, and text-box borders and margins. Before,
+KiCad 10.0.7 and later applied the absent values on every such edit, which for
+example turned pad teardrops off. Footprint library updates still rebuild pads
+from the library.
+
+Multi-step board writes name their board on `BeginCommit` and `EndCommit`.
+KiCad 10.0.7 and later refused the previously unscoped requests while the
+schematic editor was open, so those writes failed there; KiCad 10.0.6 ignores
+the header. See "Protocol version" in `KICAD_INTEGRATION.md`.
+
 ## Unreleased: footprint flips mirror inner copper layers (patch release)
 
 A footprint that changes sides now moves its inner copper items the way KiCad's

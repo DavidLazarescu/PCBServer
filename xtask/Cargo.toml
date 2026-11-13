@@ -6,3 +6,4 @@ publish = false
 
 [dependencies]
 konnect-core = { path = "../crates/konnect-core" }
+serde_json = { workspace = true }

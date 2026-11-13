@@ -23,6 +23,7 @@ cargo test --workspace --locked --lib --tests                   # all tests
 cargo clippy --workspace --locked --all-targets -- -D warnings  # lint gate, same as CI
 cargo fmt --all                                                 # format
 cargo xtask fix-doc-counts                                      # after adding or removing a tool
+cargo xtask proto-drift <kicad-tag>                             # vendored IPC protos vs a KiCad tag (network)
 cargo build --release -p konnect                                # the server binary: target/release/konnect
 ```
 

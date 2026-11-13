@@ -956,7 +956,9 @@ fn failed_multi_step_commit_is_dropped() {
     let captured_actions = actions.clone();
     let mock = spawn_mock(move |request| {
         let message = request.message.expect("request message");
-        if message.type_url.ends_with("BeginCommit") {
+        if message.type_url.ends_with("GetOpenDocuments") {
+            Some(open_board_response())
+        } else if message.type_url.ends_with("BeginCommit") {
             let response = kiapi::common::commands::BeginCommitResponse {
                 id: Some(kiapi::common::types::Kiid {
                     value: "commit-1".to_string(),
@@ -997,6 +999,9 @@ fn uncertain_batch_does_not_send_a_blind_drop_or_publish() {
     let observed = commands.clone();
     let mock = spawn_mock(move |request| {
         let message = request.message.unwrap();
+        if message.type_url.ends_with("GetOpenDocuments") {
+            return Some(open_board_response());
+        }
         observed.lock().unwrap().push(message.type_url.clone());
         if message.type_url.ends_with("BeginCommit") {
             Some(reply_with(builders::pack_any(
@@ -1042,7 +1047,9 @@ fn uncertain_batch_does_not_send_a_blind_drop_or_publish() {
 fn failed_drop_keeps_original_error_and_reports_unknown() {
     let mock = spawn_mock(|request| {
         let message = request.message.unwrap();
-        if message.type_url.ends_with("BeginCommit") {
+        if message.type_url.ends_with("GetOpenDocuments") {
+            Some(open_board_response())
+        } else if message.type_url.ends_with("BeginCommit") {
             Some(reply_with(builders::pack_any(
                 &kiapi::common::commands::BeginCommitResponse {
                     id: Some(kiapi::common::types::Kiid {
@@ -1080,7 +1087,9 @@ fn uncertain_publish_is_not_followed_by_drop_and_success_publishes_once() {
         let observed = actions.clone();
         let mock = spawn_mock(move |request| {
             let message = request.message.unwrap();
-            if message.type_url.ends_with("BeginCommit") {
+            if message.type_url.ends_with("GetOpenDocuments") {
+                Some(open_board_response())
+            } else if message.type_url.ends_with("BeginCommit") {
                 Some(reply_with(builders::pack_any(
                     &kiapi::common::commands::BeginCommitResponse {
                         id: Some(kiapi::common::types::Kiid {
@@ -1123,6 +1132,103 @@ fn uncertain_publish_is_not_followed_by_drop_and_success_publishes_once() {
             vec![kiapi::common::commands::CommitAction::CmaCommit]
         );
     }
+}
+
+#[test]
+fn commit_boundaries_name_the_board_they_were_begun_on() {
+    // KiCad 10.0.7+ refuses an unscoped BeginCommit/EndCommit while a second
+    // editor is open, so both ends of the transaction carry the board.
+    for publish in [true, false] {
+        let headers = Arc::new(Mutex::new(Vec::new()));
+        let observed = headers.clone();
+        let mock = spawn_mock(move |request| {
+            let message = request.message.unwrap();
+            if message.type_url.ends_with("GetOpenDocuments") {
+                Some(open_board_response())
+            } else if message.type_url.ends_with("BeginCommit") {
+                let command =
+                    kiapi::common::commands::BeginCommit::decode(message.value.as_slice()).unwrap();
+                observed
+                    .lock()
+                    .unwrap()
+                    .push(("BeginCommit", command.header));
+                Some(reply_with(builders::pack_any(
+                    &kiapi::common::commands::BeginCommitResponse {
+                        id: Some(kiapi::common::types::Kiid {
+                            value: "scoped-commit".into(),
+                        }),
+                    },
+                    "kiapi.common.commands.BeginCommitResponse",
+                )))
+            } else {
+                let command =
+                    kiapi::common::commands::EndCommit::decode(message.value.as_slice()).unwrap();
+                observed.lock().unwrap().push(("EndCommit", command.header));
+                Some(reply_with(builders::pack_any(
+                    &kiapi::common::commands::EndCommitResponse {},
+                    "kiapi.common.commands.EndCommitResponse",
+                )))
+            }
+        });
+        let client = KiCadIpcClient::new(&mock.url);
+        let result = client.run_commit("scoped", |_| {
+            if publish {
+                Ok(())
+            } else {
+                anyhow::bail!("operation failed")
+            }
+        });
+        assert_eq!(result.is_ok(), publish);
+
+        let expected = Some(kiapi::common::types::ItemHeader {
+            document: Some(doc_for("test.kicad_pcb")),
+            container: None,
+            field_mask: None,
+        });
+        assert_eq!(
+            *headers.lock().unwrap(),
+            vec![("BeginCommit", expected.clone()), ("EndCommit", expected)]
+        );
+    }
+}
+
+#[test]
+fn ambiguous_board_target_refuses_before_begin_commit() {
+    let commands = Arc::new(Mutex::new(Vec::new()));
+    let observed = commands.clone();
+    let mock = spawn_mock(move |request| {
+        let message = request.message.unwrap();
+        observed.lock().unwrap().push(message.type_url.clone());
+        if message.type_url.ends_with("GetOpenDocuments") {
+            Some(reply_with(builders::pack_any(
+                &kiapi::common::commands::GetOpenDocumentsResponse {
+                    documents: vec![doc_for("a.kicad_pcb"), doc_for("b.kicad_pcb")],
+                },
+                "kiapi.common.commands.GetOpenDocumentsResponse",
+            )))
+        } else {
+            Some(ok_response())
+        }
+    });
+    let mut ran = false;
+    let error = KiCadIpcClient::new(&mock.url)
+        .run_commit("ambiguous", |_| {
+            ran = true;
+            Ok(())
+        })
+        .unwrap_err();
+    assert!(!ran);
+    assert!(
+        error
+            .downcast_ref::<konnect_ipc::BoardTargetError>()
+            .is_some(),
+        "{error:#}"
+    );
+    let observed = commands.lock().unwrap();
+    assert!(
+        observed.iter().all(|url| url.ends_with("GetOpenDocuments")),
+        "nothing but the document query may be sent: {observed:?}"
+    );
 }
 
 // ─── IpcFailure classification ────────────────────────────────────────────────

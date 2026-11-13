@@ -1361,7 +1361,7 @@ impl KiCadIpcClient {
             self.get_board_document()? == document,
             "recovery target changed before drop"
         );
-        self.drop_commit(commit_id)?;
+        self.drop_commit(document.clone(), commit_id)?;
         anyhow::ensure!(
             self.get_board_document()? == document,
             "recovery target changed after drop"
@@ -2471,9 +2471,19 @@ impl KiCadIpcClient {
         Ok(())
     }
 
-    /// Begin a commit (undo group).
-    pub fn begin_commit(&self) -> Result<String> {
-        let cmd = kiapi::common::commands::BeginCommit {};
+    /// Begin a commit (undo group) on `document`.
+    ///
+    /// The header names the board. KiCad 10.0.7 and later route a scoped
+    /// `BeginCommit` to that board's editor and refuse an unscoped one while
+    /// a second editor, such as the schematic editor, is open. KiCad 10.0.6
+    /// has no such field and ignores it.
+    pub fn begin_commit(
+        &self,
+        document: kiapi::common::types::DocumentSpecifier,
+    ) -> Result<String> {
+        let cmd = kiapi::common::commands::BeginCommit {
+            header: Some(header_for(document)),
+        };
         let response_any = self.send_command(&cmd, "kiapi.common.commands.BeginCommit")?;
         let response: kiapi::common::commands::BeginCommitResponse =
             unpack_required(response_any, "BeginCommit")?;
@@ -2487,9 +2497,10 @@ impl KiCadIpcClient {
         Ok(id)
     }
 
-    /// End a commit (push or drop).
+    /// End a commit (push or drop) on the board it was begun on.
     pub fn end_commit(
         &self,
+        document: kiapi::common::types::DocumentSpecifier,
         commit_id: &str,
         action: kiapi::common::commands::CommitAction,
         message: &str,
@@ -2500,6 +2511,7 @@ impl KiCadIpcClient {
             }),
             action: action as i32,
             message: message.to_string(),
+            header: Some(header_for(document)),
         };
         let _: kiapi::common::commands::EndCommitResponse = unpack_required(
             self.send_command(&cmd, "kiapi.common.commands.EndCommit")?,
@@ -2509,8 +2521,14 @@ impl KiCadIpcClient {
     }
 
     /// Push (commit) changes.
-    pub fn push_commit(&self, commit_id: &str, description: &str) -> Result<()> {
+    pub fn push_commit(
+        &self,
+        document: kiapi::common::types::DocumentSpecifier,
+        commit_id: &str,
+        description: &str,
+    ) -> Result<()> {
         self.end_commit(
+            document,
             commit_id,
             kiapi::common::commands::CommitAction::CmaCommit,
             description,
@@ -2518,8 +2536,13 @@ impl KiCadIpcClient {
     }
 
     /// Drop (rollback) changes.
-    pub fn drop_commit(&self, commit_id: &str) -> Result<()> {
+    pub fn drop_commit(
+        &self,
+        document: kiapi::common::types::DocumentSpecifier,
+        commit_id: &str,
+    ) -> Result<()> {
         self.end_commit(
+            document,
             commit_id,
             kiapi::common::commands::CommitAction::CmaDrop,
             "",
@@ -2536,12 +2559,16 @@ impl KiCadIpcClient {
         description: &str,
         operation: impl FnOnce(&Self) -> Result<T>,
     ) -> Result<T> {
-        let commit_id = self.begin_commit()?;
+        // Resolved once, before anything is sent: an ambiguous or stale
+        // target refuses here, and every EndCommit names the board the
+        // commit was begun on.
+        let document = self.get_board_document()?;
+        let commit_id = self.begin_commit(document.clone())?;
         let operation_result =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operation(self)));
         match operation_result {
             Err(panic) => {
-                if let Err(rollback_error) = self.drop_commit(&commit_id) {
+                if let Err(rollback_error) = self.drop_commit(document.clone(), &commit_id) {
                     return Err(anyhow::Error::new(IpcOutcomeUnknown {
                         command: "EndCommit".to_string(),
                         reason: format!("commit {commit_id}: batch panicked and rollback failed ({rollback_error:#})"),
@@ -2550,13 +2577,15 @@ impl KiCadIpcClient {
                 std::panic::resume_unwind(panic)
             }
             Ok(Ok(value)) => {
-                if let Err(commit_error) = self.push_commit(&commit_id, description) {
+                if let Err(commit_error) =
+                    self.push_commit(document.clone(), &commit_id, description)
+                {
                     if commit_error.downcast_ref::<IpcOutcomeUnknown>().is_some() {
                         return Err(commit_error).context(format!(
                             "publish outcome unknown for commit {commit_id}; no blind rollback attempted"
                         ));
                     }
-                    let rollback_error = self.drop_commit(&commit_id).err();
+                    let rollback_error = self.drop_commit(document.clone(), &commit_id).err();
                     if let Some(rollback_error) = rollback_error {
                         return Err(commit_error.context(IpcOutcomeUnknown {
                             command: "EndCommit".to_string(),
@@ -2586,7 +2615,7 @@ impl KiCadIpcClient {
                         "batch outcome unknown for commit {commit_id}; no blind rollback attempted"
                     ));
                 }
-                if let Err(rollback_error) = self.drop_commit(&commit_id) {
+                if let Err(rollback_error) = self.drop_commit(document.clone(), &commit_id) {
                     return Err(operation_error.context(IpcOutcomeUnknown {
                         command: "EndCommit".to_string(),
                         reason: format!("commit {commit_id}: operation failed; rollback also failed ({rollback_error:#})"),

@@ -385,6 +385,186 @@ fn move_footprint_translates_pads_graphics_and_fields() {
     assert_eq!(builders::nm_to_mm(ref_pos.y_nm), 48.0);
 }
 
+/// R1 carrying every footprint, pad, zone, shape and text-box field KiCad
+/// 10.0.7 and 10.0.8 added, each away from its default.
+fn mk_footprint_with_new_fields() -> kiapi::board::types::FootprintInstance {
+    use kiapi::board::types as board;
+    use kiapi::common::types as common;
+
+    let teardrop = board::PadTeardropSettings {
+        mode: board::PadTeardropMode::PtmEnabled as i32,
+        curved_edges: true,
+        allow_multiple_track_segments: true,
+        prefer_zone_connection: true,
+        max_length: Some(builders::distance(1.0)),
+        max_width: Some(builders::distance(2.0)),
+        best_length_ratio: 0.5,
+        best_width_ratio: 1.0,
+        max_track_width_ratio: 0.9,
+    };
+    let overrides = vec![board::ZoneLayerOverrideEntry {
+        layer: board::BoardLayer::BlFCu as i32,
+        r#override: board::ZoneLayerOverride::ZloForceFlashed as i32,
+    }];
+    let solder_mask = board::SolderMaskOverrides {
+        solder_mask_margin: Some(builders::distance(0.05)),
+        expose_copper: true,
+    };
+
+    let mut pad = board::Pad::decode(mk_pad(99.0, 100.0).value.as_slice()).unwrap();
+    pad.teardrop = Some(teardrop);
+    pad.zone_layer_overrides = overrides;
+    pad.fab_property = board::PadFabricationProperty::PfpTestpoint as i32;
+
+    let mut zone = builders::build_zone(
+        &builders::ZoneSpec {
+            layer: "F.Cu",
+            net_name: "",
+            points: &[(99.0, 99.0), (101.0, 99.0), (101.0, 101.0)],
+            clearance_mm: 0.2,
+            min_thickness_mm: 0.25,
+            name: "",
+            priority: 0,
+            connection: board::ZoneConnectionStyle::ZcsFull,
+        },
+        0,
+    );
+    if let Some(board::zone::Settings::CopperSettings(copper)) = zone.settings.as_mut() {
+        copper.corner_smoothing = board::ZoneCornerSmoothingMode::ZcsmFillet as i32;
+        copper.corner_radius = Some(builders::distance(0.25));
+    }
+
+    let mut shape = builders::board_segment("F.Cu", 0.2, 99.5, 99.0, 100.5, 99.0);
+    shape.solder_mask = Some(solder_mask);
+
+    let text_box = board::BoardTextBox {
+        textbox: Some(common::TextBox {
+            top_left: Some(builders::vec2(99.0, 101.0)),
+            bottom_right: Some(builders::vec2(101.0, 102.0)),
+            text: "note".to_string(),
+            border_enabled: true,
+            margin_left: Some(builders::distance(0.1)),
+            margin_top: Some(builders::distance(0.2)),
+            margin_right: Some(builders::distance(0.3)),
+            margin_bottom: Some(builders::distance(0.4)),
+            ..Default::default()
+        }),
+        knockout: true,
+        ..Default::default()
+    };
+
+    let mut fp = mk_footprint_r1();
+    fp.definition.as_mut().unwrap().items = vec![
+        builders::pack_any(&pad, "kiapi.board.types.Pad"),
+        builders::pack_any(&zone, "kiapi.board.types.Zone"),
+        builders::pack_any(&shape, "kiapi.board.types.BoardGraphicShape"),
+        builders::pack_any(&text_box, "kiapi.board.types.BoardTextBox"),
+    ];
+    fp.embedded_files = Some(common::EmbeddedFiles {
+        files: vec![common::EmbeddedFile {
+            name: "part.step".to_string(),
+            r#type: common::EmbeddedFileType::EftModel as i32,
+            data: b"compressed-and-encoded".to_vec(),
+            data_hash: "0123456789abcdef".to_string(),
+        }],
+    });
+    fp.variants = vec![board::FootprintVariant {
+        name: "Lite".to_string(),
+        do_not_populate: true,
+        exclude_from_bill_of_materials: true,
+        exclude_from_position_files: true,
+        fields: [("Value".to_string(), "10k".to_string())].into(),
+    }];
+    fp.symbol_units = vec![board::FootprintUnitInfo {
+        name: "A".to_string(),
+        pin_numbers: vec!["1".to_string(), "2".to_string()],
+    }];
+    fp
+}
+
+fn child<M: Message + Default>(fp: &kiapi::board::types::FootprintInstance, type_name: &str) -> M {
+    let item = fp
+        .definition
+        .as_ref()
+        .unwrap()
+        .items
+        .iter()
+        .find(|item| item.type_url.ends_with(type_name))
+        .unwrap_or_else(|| panic!("no {type_name} child"));
+    M::decode(item.value.as_slice()).unwrap()
+}
+
+#[test]
+fn move_footprint_keeps_fields_added_in_kicad_10_0_7_and_10_0_8() {
+    use kiapi::board::types as board;
+
+    let original = mk_footprint_with_new_fields();
+    let (mock, captured) = spawn_footprint_mock(original.clone());
+    KiCadIpcClient::new(&mock.url)
+        .move_footprint("R1", 50.0, 50.0)
+        .unwrap();
+    let update = captured.lock().unwrap().take().expect("UpdateItems sent");
+    let sent = board::FootprintInstance::decode(update.items[0].value.as_slice()).unwrap();
+
+    // The move itself happened, so every child below was decoded, moved and
+    // re-encoded rather than passed through as bytes.
+    assert_eq!(builders::nm_to_mm(sent.position.unwrap().x_nm), 50.0);
+    assert_eq!(pad_positions_mm(&sent), vec![(49.0, 50.0)]);
+
+    assert_eq!(sent.embedded_files, original.embedded_files);
+    assert_eq!(sent.variants, original.variants);
+    assert_eq!(sent.symbol_units, original.symbol_units);
+
+    let (pad_before, pad_after) = (
+        child::<board::Pad>(&original, "Pad"),
+        child::<board::Pad>(&sent, "Pad"),
+    );
+    assert_eq!(pad_after.teardrop, pad_before.teardrop);
+    assert_eq!(
+        pad_after.zone_layer_overrides,
+        pad_before.zone_layer_overrides
+    );
+    assert_eq!(pad_after.fab_property, pad_before.fab_property);
+
+    let copper = |zone: board::Zone| match zone.settings {
+        Some(board::zone::Settings::CopperSettings(copper)) => {
+            (copper.corner_smoothing, copper.corner_radius)
+        }
+        other => panic!("expected copper settings, got {other:?}"),
+    };
+    assert_eq!(
+        copper(child(&sent, "Zone")),
+        copper(child(&original, "Zone"))
+    );
+
+    assert_eq!(
+        child::<board::BoardGraphicShape>(&sent, "BoardGraphicShape").solder_mask,
+        child::<board::BoardGraphicShape>(&original, "BoardGraphicShape").solder_mask
+    );
+
+    let (box_before, box_after) = (
+        child::<board::BoardTextBox>(&original, "BoardTextBox"),
+        child::<board::BoardTextBox>(&sent, "BoardTextBox"),
+    );
+    assert!(box_after.knockout);
+    let (before, after) = (box_before.textbox.unwrap(), box_after.textbox.unwrap());
+    assert!(after.border_enabled);
+    assert_eq!(
+        (
+            after.margin_left,
+            after.margin_top,
+            after.margin_right,
+            after.margin_bottom
+        ),
+        (
+            before.margin_left,
+            before.margin_top,
+            before.margin_right,
+            before.margin_bottom
+        )
+    );
+}
+
 #[test]
 fn rotate_footprint_rotates_children_around_anchor() {
     let (mock, captured) = spawn_footprint_mock(mk_footprint_r1());
