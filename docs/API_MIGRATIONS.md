@@ -3,12 +3,11 @@
 Konnect's tool schemas are public API. This file records intentional argument
 removals and the supported replacement workflow.
 
-## Unreleased: `update_pcb_from_schematic` copies symbol fields onto footprints (minor release)
+## Unreleased: `update_pcb_from_schematic` copies symbol fields onto the footprints it adds (minor release)
 
 The sync carried no symbol field beyond Reference, Value and the footprint.
 `LCSC`, `MPN`, Datasheet, Description and every custom field stayed off the
-board, and a field changed in the schematic never reached it. DRC's schematic
-parity reported each one, as `Missing symbol field` or as a field that differs.
+board, and DRC's schematic parity reported each one as `Missing symbol field`.
 
 The sync now copies the fields KiCad's Update PCB from Schematic copies, with
 that dialog's defaults: "Update footprint fields from symbols" on, "Remove
@@ -18,23 +17,24 @@ footprint fields not found in symbols" off.
 - **A field the footprint already has** keeps its layer, position, visibility
   and font, and takes the symbol's text. That includes a field the library gave
   it, so the symbol's value wins, as in KiCad.
-- **A field the footprint lacks** is added hidden on F.Fab, or B.Fab for a
-  footprint on the back, at the footprint's position and rotation. It uses
+- **A field the footprint lacks** is added hidden on F.Fab at the footprint's
+  position and rotation. It uses
   KiCad's default fabrication text: 1.0 mm, with a 0.15 mm stroke. Datasheet and
   Description, which every KiCad footprint has, are made as KiCad's footprint
   constructor makes them when the library carried neither.
 - **A footprint field the symbol lacks** is left in place.
 
-This covers added footprints and existing ones. A footprint whose fields alone
-differ from its symbol's is now planned as an update, whoever placed it. An
-update sends the whole footprint back to KiCad, as every update already did, so
-such a board shows an update for each footprint whose fields differ on its next
-sync.
+This covers the footprints the sync adds. An existing footprint keeps the
+fields it has: a field-only difference plans no update, and an update made for
+another reason carries no fields. The sync updates a footprint by replacing it
+whole, which drops the groups, points and variants it owns, and on a board
+synced before this change most footprints lack their symbol's fields, so
+propagating them would replace nearly every footprint. Carry field changes onto
+existing footprints with KiCad's Update PCB from Schematic.
 
-Each planned change gains `fields`, a list of `{name, value}`. An addition lists
-every field it receives; an update lists only the fields it changes. The
-post-apply readback compares each one's text, layer and visibility, as it does
-the library's fields.
+Each planned addition gains `fields`, a list of `{name, value}`: every field it
+receives. The post-apply readback compares each one's text, layer and
+visibility, as it does the library's fields.
 
 Not covered: the per-variant field values a KiCad 10 netlist can carry, and the
 board's own text settings, which Konnect does not read. The styles above are

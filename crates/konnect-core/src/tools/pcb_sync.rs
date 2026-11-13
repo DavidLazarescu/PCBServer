@@ -133,9 +133,6 @@ struct BoardFootprint {
     dnp: bool,
     exclude_from_bom: bool,
     not_in_schematic: bool,
-    /// Every field but Reference and Value, by name: Datasheet, Description
-    /// and the custom ones (#788).
-    fields: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -206,8 +203,6 @@ enum PlannedChange {
         exclude_from_bom: bool,
         pad_nets: BTreeMap<String, String>,
         preserve: PreservedBoardState,
-        /// Only the symbol fields whose value the footprint lacks or differs on.
-        fields: Vec<SymbolField>,
     },
 }
 
@@ -894,21 +889,12 @@ fn plan_sync(netlist_source: &str, design: &ExportedDesign, board: &BoardState) 
             }
         }
 
-        // KiCad's Update PCB updates a footprint whose fields differ from the
-        // symbol's and leaves fields the symbol lacks in place (#788).
-        let changed_fields = component
-            .fields
-            .iter()
-            .filter(|field| footprint.fields.get(&field.name) != Some(&field.value))
-            .cloned()
-            .collect::<Vec<_>>();
         let needs_update = footprint.reference != component.reference
             || footprint.value != component.value
             || footprint.symbol_path.as_deref() != Some(component.symbol_path.as_str())
             || footprint.dnp != component.dnp
             || footprint.exclude_from_bom != component.exclude_from_bom
-            || changed_pads > 0
-            || !changed_fields.is_empty();
+            || changed_pads > 0;
         if needs_update {
             changes.push(PlannedChange::Update {
                 kiid: footprint.kiid.clone(),
@@ -924,7 +910,6 @@ fn plan_sync(netlist_source: &str, design: &ExportedDesign, board: &BoardState) 
                     layer: footprint.layer.clone(),
                     locked: footprint.locked,
                 },
-                fields: changed_fields,
             });
             counts.updated.planned += 1;
             counts.pads_reassigned.planned += changed_pads;
@@ -1304,7 +1289,6 @@ fn update_footprint_item(
         dnp,
         exclude_from_bom,
         pad_nets,
-        fields,
         ..
     } = change
     else {
@@ -1316,7 +1300,6 @@ fn update_footprint_item(
         bail!("planned footprint {kiid} no longer matches the live board item");
     }
 
-    apply_symbol_fields(&mut footprint, fields)?;
     apply_footprint_fields(
         &mut footprint,
         reference,
@@ -2017,30 +2000,6 @@ fn board_footprint_from_instance(
             pad_nets.insert(pad.number, net.name);
         }
     }
-    let mut fields = BTreeMap::new();
-    for (name, field) in [
-        ("Datasheet", &footprint.datasheet_field),
-        ("Description", &footprint.description_field),
-    ] {
-        if field.is_some() {
-            fields.insert(name.to_string(), field_text(field));
-        }
-    }
-    for child in &definition.items {
-        if !konnect_ipc::builders::any_is(child, "kiapi.board.types.Field") {
-            continue;
-        }
-        // A field the snapshot cannot read would plan a second field of the
-        // same name, so it refuses, as an unreadable pad refuses an apply.
-        let field =
-            kiapi::board::types::Field::decode(child.value.as_slice()).with_context(|| {
-                format!(
-                    "footprint {} ({kiid}) has a field Konnect cannot read",
-                    field_text(&footprint.reference_field)
-                )
-            })?;
-        fields.insert(field.name.clone(), field_text(&Some(field)));
-    }
     let position = footprint.position.as_ref();
     Ok(BoardFootprint {
         kiid,
@@ -2084,7 +2043,6 @@ fn board_footprint_from_instance(
             .as_ref()
             .map(|attributes| attributes.not_in_schematic)
             .unwrap_or(false),
-        fields,
     })
 }
 
@@ -3641,7 +3599,6 @@ mod tests {
             dnp: false,
             exclude_from_bom: false,
             not_in_schematic: false,
-            fields: BTreeMap::new(),
         }
     }
 
@@ -3688,7 +3645,6 @@ mod tests {
                     dnp: false,
                     exclude_from_bom: false,
                     not_in_schematic: false,
-                    fields: BTreeMap::new(),
                 },
                 BoardFootprint {
                     kiid: "board-only".to_string(),
@@ -3705,7 +3661,6 @@ mod tests {
                     dnp: false,
                     exclude_from_bom: false,
                     not_in_schematic: true,
-                    fields: BTreeMap::new(),
                 },
             ],
             routed_nets: BTreeMap::new(),
@@ -3743,24 +3698,20 @@ mod tests {
         )));
     }
 
-    /// A footprint whose fields alone differ is updated, carrying only the
-    /// changed fields; a field the symbol lacks is no reason to update (#788).
+    /// Symbol fields travel on additions only. An existing footprint is
+    /// updated by replacing it whole, which KiCad's API does without the
+    /// footprint's groups, points and variants, and a board synced before
+    /// fields were copied lacks them on most footprints. So a field-only
+    /// difference plans nothing, and an update made for another reason
+    /// carries no fields (#788).
     #[test]
-    fn a_field_only_difference_plans_an_update_carrying_the_changed_fields() {
+    fn symbol_fields_never_make_or_ride_on_an_update() {
         let mut component = resistor("R1", "/sheet/r1");
         component.fields = vec![
             symbol_field("LCSC", "C788002"),
-            symbol_field("MPN", ""),
-            symbol_field("Datasheet", ""),
             symbol_field("Description", "Resistor"),
         ];
-        let mut footprint = board_resistor("R1", Some("/sheet/r1"));
-        footprint.fields = BTreeMap::from([
-            ("Datasheet".to_string(), String::new()),
-            ("Description".to_string(), "Resistor".to_string()),
-            ("LCSC".to_string(), "C788001".to_string()),
-            ("Board only".to_string(), "kept".to_string()),
-        ]);
+        let footprint = board_resistor("R1", Some("/sheet/r1"));
         let design = ExportedDesign {
             components: vec![component],
             skipped: Vec::new(),
@@ -3768,32 +3719,15 @@ mod tests {
         };
 
         let plan = plan_sync("fields", &design, &board_with(vec![footprint.clone()]));
-
-        assert_eq!(plan.status, PlanStatus::Ready);
-        assert_eq!(plan.counts.updated.planned, 1);
-        assert_eq!(plan.counts.pads_reassigned.planned, 0);
-        assert!(
-            matches!(plan.changes.as_slice(), [PlannedChange::Update { .. }]),
-            "{:?}",
-            plan.changes
-        );
-        let reported = serde_json::to_value(&plan.changes[0]).unwrap();
-        assert_eq!(
-            reported["fields"],
-            serde_json::json!([
-                {"name": "LCSC", "value": "C788002"},
-                {"name": "MPN", "value": ""}
-            ])
-        );
-
-        // Once the footprint carries the symbol's values, nothing is planned,
-        // whatever else the footprint carries.
-        footprint
-            .fields
-            .insert("LCSC".to_string(), "C788002".to_string());
-        footprint.fields.insert("MPN".to_string(), String::new());
-        let plan = plan_sync("fields", &design, &board_with(vec![footprint]));
         assert_eq!(plan.status, PlanStatus::Noop, "{:?}", plan.changes);
+
+        let mut renamed = footprint;
+        renamed.value = "2k".to_string();
+        let plan = plan_sync("fields", &design, &board_with(vec![renamed]));
+        assert_eq!(plan.status, PlanStatus::Ready);
+        let reported = serde_json::to_value(&plan.changes).unwrap();
+        assert_eq!(reported[0]["kind"], "update", "{reported:#}");
+        assert!(reported[0].get("fields").is_none(), "{reported:#}");
     }
 
     /// Build a footprint carrying one pad and one child of every graphic kind,
@@ -3932,7 +3866,6 @@ mod tests {
                 layer: "F.Cu".to_string(),
                 locked: false,
             },
-            fields: Vec::new(),
         };
         let updated =
             update_footprint_item(&item, &change, &BTreeMap::from([("GND".to_string(), 1)]))
@@ -4203,7 +4136,6 @@ mod tests {
                 layer: "F.Cu".to_string(),
                 locked: true,
             },
-            fields: Vec::new(),
         };
 
         let updated =
@@ -4343,86 +4275,27 @@ mod tests {
         )
     }
 
-    /// `live` after a planned update that writes `fields`.
-    fn updated_with(
-        live: &konnect_ipc::gen::kiapi::board::types::FootprintInstance,
+    /// `footprint` after the symbol's `fields` are applied to it.
+    fn with_symbol_fields(
+        footprint: &konnect_ipc::gen::kiapi::board::types::FootprintInstance,
         fields: Vec<SymbolField>,
     ) -> konnect_ipc::gen::kiapi::board::types::FootprintInstance {
-        let board = board_footprint_from_instance(live).unwrap();
-        let change = PlannedChange::Update {
-            kiid: board.kiid.clone(),
-            reference: board.reference.clone(),
-            value: board.value.clone(),
-            symbol_path: "/root/r1".to_string(),
-            dnp: false,
-            exclude_from_bom: false,
-            pad_nets: board.pad_nets.clone(),
-            preserve: PreservedBoardState {
-                position: board.position,
-                rotation: board.rotation,
-                layer: board.layer.clone(),
-                locked: board.locked,
-            },
-            fields,
-        };
-        let item = konnect_ipc::builders::pack_any(live, "kiapi.board.types.FootprintInstance");
-        let updated = update_footprint_item(&item, &change, &BTreeMap::new()).unwrap();
-        konnect_ipc::gen::kiapi::board::types::FootprintInstance::decode(updated.value.as_slice())
-            .unwrap()
+        let mut footprint = footprint.clone();
+        apply_symbol_fields(&mut footprint, &fields).unwrap();
+        footprint
     }
 
-    /// The snapshot reads what the planner compares: Datasheet and Description
-    /// from their own slots, and each custom field by name (#788).
+    /// A field the footprint already has, such as one its library gave it,
+    /// takes the symbol's text and keeps everything else: layer, visibility,
+    /// lock, position and font. Both KiCad's own Description and a custom
+    /// field on the silkscreen (#788).
     #[test]
-    fn the_snapshot_reads_a_footprints_fields_by_name() {
-        let r1 = captured_r1();
-        let shown = shown_custom_field("LCSC", "C1", &r1);
-
-        let board = board_footprint_from_instance(&with_field_item(r1, &shown)).unwrap();
-
-        assert_eq!(
-            board.fields,
-            BTreeMap::from([
-                ("Datasheet".to_string(), String::new()),
-                ("Description".to_string(), String::new()),
-                ("LCSC".to_string(), "C1".to_string()),
-            ])
-        );
-    }
-
-    /// A field the snapshot cannot read refuses it, naming the footprint. Read
-    /// as absent, it would plan a second field of the same name.
-    #[test]
-    fn an_undecodable_field_refuses_the_snapshot() {
-        let r1 = captured_r1();
-        let shown = shown_custom_field("LCSC", "C1", &r1);
-        let mut footprint = with_field_item(r1, &shown);
-        for child in &mut footprint.definition.as_mut().unwrap().items {
-            if konnect_ipc::builders::any_is(child, "kiapi.board.types.Field") {
-                // Wire type 7 does not exist; nothing can decode this.
-                child.value = vec![0xff, 0xff, 0xff];
-            }
-        }
-
-        let error = board_footprint_from_instance(&footprint)
-            .expect_err("an unreadable field must not pass silently");
-        let text = format!("{error:#}");
-        assert!(
-            text.contains("R1") && text.contains("cannot read"),
-            "must name the footprint and say the field is unreadable: {text}"
-        );
-    }
-
-    /// On an update, a field the footprint has takes the symbol's text and
-    /// keeps everything else: layer, visibility, lock, position and font. Both
-    /// KiCad's own Description and a custom field on the silkscreen (#788).
-    #[test]
-    fn an_update_changes_only_the_text_of_a_field_the_footprint_has() {
+    fn a_field_the_footprint_has_takes_only_the_symbols_text() {
         let r1 = captured_r1();
         let shown = shown_custom_field("LCSC", "C1", &r1);
         let live = with_field_item(r1, &shown);
 
-        let updated = updated_with(
+        let updated = with_symbol_fields(
             &live,
             vec![
                 symbol_field("LCSC", "C788002"),
@@ -4437,7 +4310,7 @@ mod tests {
         );
         assert_eq!(
             updated.datasheet_field, live.datasheet_field,
-            "a field the update does not name is as KiCad sent it"
+            "a field the symbol does not name is as KiCad sent it"
         );
         let custom = field_items(&updated);
         assert_eq!(custom.len(), 1, "{:?}", custom.keys());
@@ -4449,11 +4322,11 @@ mod tests {
     /// F.Fab at the footprint's position in default fabrication text, and on
     /// the back on B.Fab, mirrored, at the footprint's normalised angle (#788).
     #[test]
-    fn an_update_adds_a_field_the_footprint_lacks_as_update_pcb_adds_it() {
+    fn a_field_the_footprint_lacks_is_added_as_update_pcb_adds_it() {
         use konnect_ipc::gen::kiapi::{board::types::BoardLayer, common::types as common};
 
         let front = captured_r1();
-        let added = field_items(&updated_with(
+        let added = field_items(&with_symbol_fields(
             &front,
             vec![symbol_field("MPN", "MPN-788-R1")],
         ))
@@ -4483,7 +4356,7 @@ mod tests {
         back.orientation = Some(common::Angle {
             value_degrees: -90.0,
         });
-        let added = field_items(&updated_with(
+        let added = field_items(&with_symbol_fields(
             &back,
             vec![symbol_field("MPN", "MPN-788-R1")],
         ))
@@ -4539,7 +4412,6 @@ mod tests {
                 dnp: false,
                 exclude_from_bom: false,
                 not_in_schematic: false,
-                fields: BTreeMap::new(),
             }],
             routed_nets: BTreeMap::from([("VCC".to_string(), 1)]),
             bounds: Bounds {
