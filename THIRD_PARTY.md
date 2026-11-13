@@ -5,6 +5,19 @@ code ported from the following projects. PCBServer is licensed under the
 AGPL-3.0-only (see LICENSE); the notices below travel with every distribution
 of it.
 
+## KiCad IPC API definitions
+
+`crates/konnect-ipc/proto/` holds unmodified copies of the protocol buffer
+definitions from KiCad's `api/proto/` directory
+(https://gitlab.com/kicad/code/kicad), compiled into the IPC client. The tag
+and commit they were taken from are recorded in
+`crates/konnect-ipc/proto/README.md`. Copyright Jon Evans and the KiCad
+Developers. Each file keeps its upstream header: all are licensed under the GNU
+General Public License, version 3 or (at your option) any later version, except
+`common/types/variants.proto` and `common/commands/variant_commands.proto`,
+which are licensed under the MIT license whose text is reproduced in those
+files. Section 13 of the GPL-3.0 and of the AGPL-3.0 permits combining the two.
+
 ## topola_specctra
 
 Konnect uses the `topola_specctra` parser, data model, and serializer from the

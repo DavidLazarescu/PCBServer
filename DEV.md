@@ -136,7 +136,7 @@ Konnect/
 │   │       └── types.rs              # Shared value types (fmt_f64, …)
 │   │
 │   ├── konnect-ipc/                   # KiCAD 10 IPC API client
-│   │   ├── proto/                    # Protobuf definitions (copied from KiCAD v10 source)
+│   │   ├── proto/                    # KiCad 10.0.8 api/proto, unmodified; provenance in proto/README.md
 │   │   ├── build.rs                  # prost-build protobuf code generation
 │   │   └── src/
 │   │       ├── gen.rs                # Generated protobuf Rust types
