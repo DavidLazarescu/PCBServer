@@ -32,6 +32,10 @@ run the clippy command yourself before a pull request and read its output with t
 
 ## Rules
 
+- Working results stay local. Plans, analyses, reviews, backlogs, research reports and design
+  proposals go into `notes/` (gitignored) and are never committed, pushed, or pasted into a commit
+  message, pull request or issue. Only code, tests and documentation of the product itself
+  (`docs/`, `README.md`, `DEV.md`) are published. When unsure which one a file is, treat it as a note.
 - Never push upstream tags (`v*`) and never create a tag unasked: `release.yml` publishes on tag push.
 - No release before the rename away from "konnect" is complete.
 - License is AGPL-3.0-only. No code from Konnect-EDA or any closed source. New dependencies must
@@ -66,6 +70,7 @@ run the clippy command yourself before a pull request and read its output with t
 1. Read the affected area and the docs above. For a PCB feature, confirm in
    `crates/konnect-ipc/proto/` that KiCad 10 offers it.
 2. Write a short plan (what, where, how it is tested, what it refuses) and get the owner's approval.
+   The plan lives in the chat or in `notes/`, not in the repository.
 3. Implement with tests on a branch. Adding a tool: use the `add-tool` skill.
 4. Run `/code-review` on the diff before opening the pull request.
 5. When the owner corrects something or the code surprises us, add one line to this file or to
