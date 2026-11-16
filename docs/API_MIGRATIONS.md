@@ -3,6 +3,23 @@
 Konnect's tool schemas are public API. This file records intentional argument
 removals and the supported replacement workflow.
 
+## Unreleased: teardrops on pads and vias (minor release)
+
+Two new tools in `pcb_routing`, both live-only and for KiCad 10.0.7 or newer
+(`unsupported_capability` naming the running version otherwise):
+
+- `get_teardrops` reads the teardrop settings of pads and vias (all, or by
+  `item_ids`, `nets`, `references`, `kinds`, `pad_types`) and counts the
+  teardrop shapes KiCad has built on copper (`teardrop_areas`).
+- `set_teardrops` changes the named settings on the selected items in one
+  KiCad undo step. Pads are written by resending their footprint with only the
+  pad's `teardrop` changed. KiCad builds the shapes while it applies the step.
+  A fresh read must show the requested settings on every changed item and every
+  other pad and via unchanged, otherwise `readback_mismatch` or
+  `mutation_outcome_uncertain`. The board is not saved (`persisted: false`).
+
+No existing tool changed.
+
 ## Unreleased: label rotation and bulk moves leave names and values alone (patch release)
 
 `rotate_schematic_label` found a label's `(at …)`, `(justify …)` and

@@ -955,3 +955,113 @@ fn net_classes_round_trip_through_live_kicad() {
     assert_eq!(saved_class["clearance"], json!(0.31), "{saved_class}");
     assert_eq!(saved_class["track_width"], json!(0.27), "{saved_class}");
 }
+
+/// Teardrops on vias while KiCad holds the board: set through the served
+/// tools, checked with an independent `GetItems`, the shapes KiCad builds
+/// counted, then put back. Pads are checked to be left alone.
+///
+/// Mutates the open board without saving it: use a disposable copy with at
+/// least one via that a track ends on, open in KiCad 10.0.7 or newer. Close
+/// it without saving afterwards.
+///
+/// ```text
+/// KICAD_API_SOCKET=… KONNECT_LIVE_KICAD_BOARD=… \
+///   cargo test -p konnect --test live_kicad_tools -- --ignored --nocapture \
+///   teardrops_round_trip_through_live_kicad
+/// ```
+#[test]
+#[ignore = "requires a running KiCad 10.0.7+ GUI, API socket, and a disposable open board with a routed via"]
+fn teardrops_round_trip_through_live_kicad() {
+    use kiapi::board::types::{PadTeardropMode, Via};
+
+    let board = std::path::PathBuf::from(
+        std::env::var("KONNECT_LIVE_KICAD_BOARD")
+            .expect("KONNECT_LIVE_KICAD_BOARD must name the disposable open board"),
+    );
+    let socket = std::env::var("KICAD_API_SOCKET").expect("KICAD_API_SOCKET is required");
+    let ipc = KiCadIpcClient::new(&socket);
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let document = loop {
+        match ipc.find_open_board(&board) {
+            Ok(document) => break document,
+            Err(error)
+                if error.to_string().contains("AS_NOT_READY")
+                    && std::time::Instant::now() < deadline => {}
+            Err(error) => panic!("KiCad did not open the disposable board: {error:#}"),
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    };
+    let vias = |ipc: &KiCadIpcClient| -> Vec<Via> {
+        ipc.get_items_in(
+            document.clone(),
+            kiapi::common::types::KiCadObjectType::KotPcbVia,
+        )
+        .expect("KiCad answered GetItems")
+        .iter()
+        .map(|item| Via::decode(item.value.as_slice()).unwrap())
+        .collect()
+    };
+    let enabled = |via: &Via| {
+        via.teardrop
+            .as_ref()
+            .expect("KiCad 10.0.7+ sends via teardrop settings")
+            .mode
+            == PadTeardropMode::PtmEnabled as i32
+    };
+    let before = vias(&ipc);
+    assert!(!before.is_empty(), "the board needs at least one via");
+    let were_off: Vec<String> = before
+        .iter()
+        .filter(|via| !enabled(via))
+        .map(|via| via.id.as_ref().unwrap().value.clone())
+        .collect();
+
+    let mut mcp = McpProcess::spawn(&socket);
+    mcp.tool("load_toolset", json!({"name": "pcb_routing"}));
+    let body = |result: Value| -> Value {
+        serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap()
+    };
+    let pads_before = body(mcp.tool(
+        "get_teardrops",
+        json!({"board": board, "kinds": ["pad"], "limit": 20000}),
+    ));
+    assert_eq!(pads_before["source"], "ipc", "{pads_before}");
+
+    let set = body(mcp.tool(
+        "set_teardrops",
+        json!({"board": board, "kinds": ["via"], "enabled": true}),
+    ));
+    assert_eq!(set["selected_count"], before.len(), "{set}");
+    assert_eq!(set["changed_count"], were_off.len(), "{set}");
+    println!(
+        "teardrop areas before {} after {}",
+        set["teardrop_areas"]["before"], set["teardrop_areas"]["after"]
+    );
+    assert!(
+        vias(&ipc).iter().all(enabled),
+        "every via reads back enabled"
+    );
+    let pads_after = body(mcp.tool(
+        "get_teardrops",
+        json!({"board": board, "kinds": ["pad"], "limit": 20000}),
+    ));
+    assert_eq!(pads_after["items"], pads_before["items"], "pads untouched");
+
+    if !were_off.is_empty() {
+        let restored = body(mcp.tool(
+            "set_teardrops",
+            json!({"board": board, "item_ids": were_off, "enabled": false}),
+        ));
+        assert_eq!(restored["changed_count"], were_off.len(), "{restored}");
+    }
+    let settings = |vias: Vec<Via>| {
+        vias.into_iter()
+            .map(|via| (via.id.unwrap().value, via.teardrop))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    assert_eq!(
+        settings(vias(&ipc)),
+        settings(before),
+        "via settings restored"
+    );
+}

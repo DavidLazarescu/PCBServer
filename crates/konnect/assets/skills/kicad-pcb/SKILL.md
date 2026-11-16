@@ -60,7 +60,7 @@ Before any PCB work, load the required toolsets:
 ```
 load_toolset('pcb_board')        # board outline, layers, setup, stackup
 load_toolset('pcb_components')   # place, refresh, move, rotate, align footprints
-load_toolset('pcb_routing')      # traces, vias, differential pairs
+load_toolset('pcb_routing')      # traces, vias, differential pairs, teardrops
 load_toolset('sch_export')       # update PCB from the saved schematic hierarchy
 ```
 
@@ -259,6 +259,34 @@ geometry field is unavailable evidence, not a zero-size pad.
 | `route_differential_pair` | Matched-length USB/LVDS/Ethernet pairs      |
 | `add_via`                 | Layer transition                            |
 | `create_netclass`         | Define width/clearance rules for net groups |
+| `get_teardrops`           | Teardrop settings of pads and vias, shape count |
+| `set_teardrops`           | Turn teardrops on/off or reshape them on selected pads and vias |
+
+### Teardrops
+
+Set teardrops with `set_teardrops` instead of asking the user to do it in KiCad
+(KiCad 10.0.7+; older versions are refused with `unsupported_capability`). Do it
+after routing, since KiCad builds a teardrop only where a track ends on a pad or
+via:
+
+```
+get_teardrops(board, kinds=['via'])                 # what is set now
+set_teardrops(board, kinds=['via'], enabled=true)   # every via
+set_teardrops(board, pad_types=['pth'], enabled=true)
+set_teardrops(board, nets=['VBUS'], enabled=true, curved_edges=true)
+set_teardrops(board, all=true, enabled=false)       # remove them everywhere
+```
+
+- Filters combine (an item must match every one); `references` and `pad_types`
+  leave vias out. A call with no filter needs `all=true`.
+- Only the named settings change. KiCad builds the shapes in the same undo step;
+  compare the teardrop area counts before and after in the result, and read its note when
+  enabled items got no new shape (track too wide, pad in a zone of its net with
+  `prefer_zone_connection`, or a board still on legacy teardrops).
+- Run `refill_zones` afterwards so the teardrops are fitted to the copper around
+  them, then `save_project`; the change is not saved (`persisted: false`).
+- Board Setup > Teardrops defaults and track-to-track teardrops are not reachable
+  through KiCad's API; tell the user if they need those changed.
 
 ### route_pad_to_pad
 

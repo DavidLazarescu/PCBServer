@@ -36,6 +36,7 @@ pub mod pcb_export;
 pub(crate) mod pcb_footprint_update;
 pub mod pcb_routing;
 pub(crate) mod pcb_sync;
+mod pcb_teardrops;
 mod placed_footprint_models;
 pub mod placement;
 pub mod project;
@@ -56,6 +57,8 @@ pub mod schematic_builder;
 #[cfg(test)]
 mod schematic_placement_tests;
 pub mod svg_import;
+#[cfg(test)]
+mod teardrop_ipc_tests;
 pub mod templates;
 pub mod verification;
 

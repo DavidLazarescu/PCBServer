@@ -4984,7 +4984,7 @@ fn build_graphic_child(
 
 /// The reference designator text of a placed footprint, or `""` when the
 /// instance carries no reference field.
-fn footprint_reference(footprint: &kiapi::board::types::FootprintInstance) -> &str {
+pub(crate) fn footprint_reference(footprint: &kiapi::board::types::FootprintInstance) -> &str {
     footprint
         .reference_field
         .as_ref()

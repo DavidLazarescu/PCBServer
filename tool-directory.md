@@ -13,7 +13,7 @@ Compatibility notes for removed or narrowed arguments are recorded in
 ## Overview
 
 - **21 toolsets** organized into 10 categories
-- **228 registered tools** + **7 always-visible meta-tools** = **235 total**
+- **230 registered tools** + **7 always-visible meta-tools** = **237 total**
 - **Discovery pattern**: the server pre-loads only the **starter kit** (`project`, `config`) so baseline `tools/list` costs ~2K tokens instead of ~23K. The LLM reads `list_toolboxes` → calls `load_toolset(name)` to expose additional tools on demand; `unload_toolset(name)` prunes them. `tools/list_changed` is notified on every mutation. If the LLM calls a tool whose toolset isn't loaded, the error names the owning toolset so recovery is a single `load_toolset` hop. `load_toolset` also accepts an array of names to load several toolsets with a single `tools/list` refresh.
 - **Observability**: every `tools/call` is recorded — ring buffer of the last 100 calls + per-tool counters + JSONL at `<konnect dir>/logs/calls.jsonl`. The LLM self-diagnoses via `get_recent_calls` and `server_stats`.
 
@@ -279,9 +279,9 @@ and Windows servers do not.
 | `duplicate_component` | Duplicate an existing footprint at a new position via KiCAD IPC. |
 | `get_board_2d_view` | Render the board with kicad-cli and return a base64 PNG. This is the 3-D render viewed from the top, not a layer plot, and takes no layer selection — use `export_svg` for layer-aware output. |
 
-### `pcb_routing` · 15 tools
-**Purpose:** Traces, vias, copper pours, net classes, differential pairs, and strict Specctra SES import.
-**Source:** [`crates/konnect-core/src/tools/pcb_routing.rs`](crates/konnect-core/src/tools/pcb_routing.rs)
+### `pcb_routing` · 17 tools
+**Purpose:** Traces, vias, copper pours, net classes, differential pairs, pad and via teardrops, and strict Specctra SES import.
+**Source:** [`crates/konnect-core/src/tools/pcb_routing.rs`](crates/konnect-core/src/tools/pcb_routing.rs), [`crates/konnect-core/src/tools/pcb_teardrops.rs`](crates/konnect-core/src/tools/pcb_teardrops.rs)
 
 | Tool | Description |
 |------|-------------|
@@ -300,6 +300,8 @@ and Windows servers do not.
 | `get_netclasses` | Read every netclass with its settings, its `netclass_patterns` and the board nets those patterns match. Mixed-source: where KiCad holds the board, definitions and nets come from KiCad over IPC; otherwise from the `.kicad_pro` and the saved board (`board_source` selects that). Patterns always come from the `.kicad_pro`, which KiCad's IPC API cannot read. `sources` names each. KiCad need not be running. Reports `Default` (marked) and any pattern naming a class that does not exist. |
 | `assign_net_to_class` | Assign a net to an existing netclass via a `netclass_patterns` entry in the `.kicad_pro`; reassigning moves the entry. Needs the board closed in KiCad, since KiCad's IPC API has no pattern command; refuses with `unsupported_capability` while KiCad holds it. |
 | `route_differential_pair` | Route a differential pair (two parallel traces with a specified gap). |
+| `get_teardrops` | Read the teardrop settings of pads and vias on the live board (all, or by id, net, footprint reference, kind or pad type) and count the teardrop shapes KiCad has built. KiCad 10.0.7+; older versions are refused with `unsupported_capability`. |
+| `set_teardrops` | Change the named teardrop settings on selected pads and vias (filters, or `all: true`) in one KiCad undo step; pads are written by resending their footprint with only the pad's teardrop changed. KiCad builds the shapes while it applies the step. A fresh read must show every changed item as requested and every other pad and via unchanged (`readback_mismatch` / `mutation_outcome_uncertain` otherwise). KiCad 10.0.7+; not saved. |
 
 ### `placement` · 5 tools
 **Purpose:** Placement quality and automation — score, plan decoupling rows, plan BGA fanouts; every plan reports its own before/after score.

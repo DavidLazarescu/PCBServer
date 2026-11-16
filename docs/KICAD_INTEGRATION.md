@@ -95,7 +95,6 @@ The 10.0.8 definitions offer more than any tool uses yet:
 
 | Capability | Since |
 |---|---|
-| `PadTeardropSettings` on `Pad.teardrop` and `Via.teardrop` | 10.0.7 |
 | `Via.is_free` (via not updated by netlist changes) | 10.0.7 |
 | `Pad.fab_property` (BGA, fiducial, test point, heat sink, castellated, mechanical, press-fit) | 10.0.7 |
 | `SolderMaskOverrides.expose_copper` on tracks, arcs and graphic shapes | 10.0.7 |
@@ -113,6 +112,23 @@ comment; 10.0.7 is the first tag that defines them. `ZoneLayerOverrideEntry` is
 marked unstable by KiCad and exists only so items round-trip. KiCad also
 renamed `TeardropSettings` and `TeardropType` to `ZoneTeardropSettings` and
 `ZoneTeardropType`; the wire format is unchanged.
+
+### Teardrops
+
+`get_teardrops` and `set_teardrops` use `Pad.teardrop` and `Via.teardrop`
+(10.0.7). KiCad needs no separate action to build the shapes: when a commit
+that holds a pad, via or footprint is pushed, `BOARD_COMMIT::Push`
+(`pcbnew/board_commit.cpp`) removes their teardrops and rebuilds them with
+`TEARDROP_MANAGER::UpdateTeardrops`, for every track ending on an item whose
+settings are enabled and within its size limits. The shapes are zones of type
+`ZT_TEARDROP`, filled with their outline until the next zone fill;
+`RefillZones` (the `zoneFillAll` action) rebuilds every teardrop first. A board
+loaded with legacy teardrops gets none. A pad is written by resending its
+whole footprint, since KiCad replaces a footprint on update rather than
+copying into it. Board Setup > Teardrops keeps its defaults in the
+`.kicad_pro` (`teardrop_options`, `teardrop_parameters`); no API command reads
+or sets them, and they only seed KiCad's Edit Teardrops dialog, except the
+track-to-track switch, which has no per-item setting.
 
 ### Editor observation
 

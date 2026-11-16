@@ -1,4 +1,5 @@
-//! `pcb_routing` toolset — traces, vias, copper pours, nets, netclasses, and diff pairs.
+//! `pcb_routing` toolset — traces, vias, copper pours, nets, netclasses, diff pairs,
+//! and pad and via teardrops (`pcb_teardrops`).
 //!
 //! Routing operations use the KiCAD IPC API; `add_net` and `add_copper_pour`
 //! use S-expression file manipulation. Net classes go through KiCad's IPC API
@@ -53,7 +54,7 @@ macro_rules! ipc {
 // ─── Tool definitions ─────────────────────────────────────────────────────────
 
 pub fn tools() -> Vec<ToolDef> {
-    vec![
+    let mut tools = vec![
         tool!(
             "add_net",
             "Idempotently add a net to the top-level net table of a pre-KiCad-10 board \
@@ -341,7 +342,9 @@ pub fn tools() -> Vec<ToolDef> {
             |args, ctx| async move { handle_route_diff_pair(args, ctx).await }
         )
         .with_board_access(crate::tools::BoardAccess::LiveOnly),
-    ]
+    ];
+    tools.extend(super::pcb_teardrops::tools());
+    tools
 }
 
 // ─── Handlers ─────────────────────────────────────────────────────────────────
