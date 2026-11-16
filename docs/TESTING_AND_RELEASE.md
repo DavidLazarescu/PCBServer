@@ -85,6 +85,19 @@ disposable copy of a board that has its sibling `.kicad_pro`, set
 cargo test -p konnect --test live_kicad_tools -- --ignored --nocapture net_classes_round_trip_through_live_kicad
 ```
 
+Teardrops have their own live gate, `teardrops_round_trip_through_live_kicad`
+in the same file. It enables teardrops on every via with `set_teardrops`,
+checks each via with an independent `GetItems`, checks with `get_teardrops`
+that no pad's settings changed, prints the teardrop shape count before and
+after, and puts the vias back as they were. It does not save, but it changes
+the open board, so open a disposable copy of a board with at least one via a
+track ends on, in KiCad 10.0.7 or newer, set `KONNECT_LIVE_KICAD_BOARD` and
+`KICAD_API_SOCKET`, run the command below, and close the board without saving.
+
+```text
+cargo test -p konnect --test live_kicad_tools -- --ignored --nocapture teardrops_round_trip_through_live_kicad
+```
+
 ## CI And Live Validation
 
 `.github/workflows/ci.yml` covers the Rust workspace, formatting, clippy,
